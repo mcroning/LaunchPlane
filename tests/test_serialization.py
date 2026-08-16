@@ -109,3 +109,36 @@ def test_rejects_duplicate_beam_names():
 
     with pytest.raises(ValueError, match="Duplicate beam name"):
         beam_stack_to_dict(stack)
+
+
+def test_serialization_stores_only_beam_coherence_group_strings():
+    payload = beam_stack_to_dict(make_stack())
+
+    assert "coherence_groups" not in payload
+    assert [beam["coherence_group"] for beam in payload["beams"]] == [
+        "laser_A",
+        "laser_B",
+    ]
+    assert beam_stack_from_dict(payload) == make_stack()
+
+
+def test_rejects_empty_coherence_group():
+    stack = BeamStackDefinition(
+        beams=(BeamDefinition(name="No laser", coherence_group="   "),)
+    )
+
+    with pytest.raises(ValueError, match="coherence_group must be non-empty"):
+        beam_stack_to_dict(stack)
+
+
+def test_coherence_groups_are_derived_in_first_use_order():
+    stack = BeamStackDefinition(
+        beams=(
+            BeamDefinition(name="A", coherence_group="laser_B", enabled=False),
+            BeamDefinition(name="B", coherence_group="laser_A"),
+            BeamDefinition(name="C", coherence_group="laser_B"),
+        )
+    )
+
+    stack.validate()
+    assert stack.coherence_groups == ("laser_B", "laser_A")

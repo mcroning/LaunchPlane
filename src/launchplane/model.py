@@ -74,6 +74,9 @@ class BeamDefinition:
         if self.waist_y_um <= 0:
             raise ValueError("waist_y_um must be positive")
 
+        if not self.coherence_group.strip():
+            raise ValueError("coherence_group must be non-empty")
+
 
 @dataclass(frozen=True)
 class BeamStackDefinition:
@@ -112,16 +115,9 @@ class BeamStackDefinition:
 
     @property
     def coherence_groups(self):
+        """Laser names in first-use order, derived from beam membership."""
 
-        return tuple(
-            sorted(
-                {
-                    beam.coherence_group
-                    for beam in self.beams
-                    if beam.enabled
-                }
-            )
-        )
+        return tuple(dict.fromkeys(beam.coherence_group for beam in self.beams))
 
 
 @dataclass(frozen=True)
