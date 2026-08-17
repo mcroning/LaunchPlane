@@ -4,6 +4,27 @@ LaunchPlane is a reusable GUI and data-model component for defining and
 visualizing optical beam launch conditions. It provides an interactive
 launch-plane editor together with beam definitions and JSON serialization.
 
+## Launch-angle semantics
+
+The normal editor specifies external launch angles in radians. These angles
+are measured in the LaunchPlane launch medium immediately before the first
+downstream optical or material interface. Air, with launch-medium refractive
+index `1.0`, is the default for newly created angle-mode beams. They are not
+internal crystal angles, and LaunchPlane does not calculate downstream
+refraction.
+
+Each beam's `wavelength_um` is its vacuum wavelength. LaunchPlane converts the
+external projected-plane angles to the conserved transverse wavevector
+components `qx` and `qy` in rad/µm. The stored compatibility fields
+`tilt_x_rad_per_um` and `tilt_y_rad_per_um` contain those components; they are
+phase slopes, not angles. They remain the canonical interchange quantities,
+and LCProp receives them unchanged.
+
+The advanced transverse-wavevector editor allows direct phase-slope input.
+Legacy schema-version-1 records are loaded in that advanced mode with an
+unknown launch medium, preserving their stored phase slopes exactly without
+assuming that they originated in air.
+
 ## Project status
 
 LaunchPlane is experimental, developmental, and pre-release software. Its API

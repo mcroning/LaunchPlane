@@ -75,11 +75,17 @@ class BeamItem(QGraphicsObject):
         self.update()
 
     def tilt_tip_offset(self) -> QPointF:
-        """Return the tilt-arrow tip in beam-local scene coordinates."""
+        """Return the launch-direction arrow tip in beam-local coordinates."""
+
+        if self.beam.launch_input_mode == "angle":
+            component_x, component_y = self.beam.launch_angles_rad
+        else:
+            component_x = self.beam.tilt_x_rad_per_um
+            component_y = self.beam.tilt_y_rad_per_um
 
         return QPointF(
-            self.beam.tilt_y_rad_per_um * self.tilt_arrow_scale,
-            -self.beam.tilt_x_rad_per_um * self.tilt_arrow_scale,
+            component_y * self.tilt_arrow_scale,
+            -component_x * self.tilt_arrow_scale,
         )
 
     def set_tilt_tip(self, scene_position: QPointF) -> None:
@@ -87,17 +93,33 @@ class BeamItem(QGraphicsObject):
 
         offset = scene_position - self.scenePos()
         self.prepareGeometryChange()
-        self.beam = replace(
-            self.beam,
-            tilt_x_rad_per_um=-float(offset.y()) / self.tilt_arrow_scale,
-            tilt_y_rad_per_um=float(offset.x()) / self.tilt_arrow_scale,
-        )
+        component_x = -float(offset.y()) / self.tilt_arrow_scale
+        component_y = float(offset.x()) / self.tilt_arrow_scale
+        if self.beam.launch_input_mode == "angle":
+            self.beam = self.beam.with_launch_angles(
+                angle_x_rad=component_x,
+                angle_y_rad=component_y,
+            )
+        else:
+            self.beam = replace(
+                self.beam,
+                tilt_x_rad_per_um=component_x,
+                tilt_y_rad_per_um=component_y,
+            )
         self._update_tilt_handle()
         self.update()
         self.changed.emit(self.index, self.beam)
 
     def _update_tilt_handle(self) -> None:
         self._tilt_handle.setPos(self.tilt_tip_offset())
+        if self.beam.launch_input_mode == "angle":
+            self._tilt_handle.setToolTip(
+                "External launch direction in radians (launch medium)."
+            )
+        else:
+            self._tilt_handle.setToolTip(
+                "Transverse wavevector / phase slope in rad/µm."
+            )
 
     def boundingRect(self) -> QRectF:
         waist_y = max(6.0, float(self.beam.waist_y_um))

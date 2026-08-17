@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from launchplane.model import BeamDefinition, BeamStackDefinition
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def beam_stack_to_dict(stack: BeamStackDefinition) -> dict[str, Any]:
@@ -27,9 +27,9 @@ def beam_stack_from_dict(data: Mapping[str, Any]) -> BeamStackDefinition:
         raise TypeError("Serialized beam stack must be a mapping")
 
     version = data.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if version not in (1, SCHEMA_VERSION):
         raise ValueError(
-            f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}"
+            f"Unsupported schema_version {version!r}; expected 1 or {SCHEMA_VERSION}"
         )
 
     beam_items = data.get("beams")
@@ -40,8 +40,25 @@ def beam_stack_from_dict(data: Mapping[str, Any]) -> BeamStackDefinition:
     for index, item in enumerate(beam_items):
         if not isinstance(item, Mapping):
             raise ValueError(f"Beam entry {index} must be a mapping")
+        beam_data = dict(item)
+        if version == 1:
+            # Version 1 stored phase slopes without launch-medium provenance.
+            # Preserve those numbers exactly and never infer that they came
+            # from an air launch angle.
+            beam_data["launch_medium_index"] = None
+            beam_data["launch_input_mode"] = "transverse_wavevector"
+        else:
+            missing = {
+                "launch_medium_index",
+                "launch_input_mode",
+            }.difference(beam_data)
+            if missing:
+                names = ", ".join(sorted(missing))
+                raise ValueError(
+                    f"Invalid beam entry {index}: missing schema-2 fields: {names}"
+                )
         try:
-            beam = BeamDefinition(**dict(item))
+            beam = BeamDefinition(**beam_data)
         except TypeError as exc:
             raise ValueError(f"Invalid beam entry {index}: {exc}") from exc
         beams.append(beam)

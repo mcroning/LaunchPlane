@@ -53,6 +53,41 @@ def test_beam_stack_dict_round_trip():
 
     assert payload["schema_version"] == SCHEMA_VERSION
     assert restored == stack
+    assert payload["beams"][0]["launch_input_mode"] == "transverse_wavevector"
+    assert payload["beams"][0]["launch_medium_index"] is None
+
+
+def test_schema_one_migration_preserves_phase_slopes_and_unknown_medium():
+    payload = beam_stack_to_dict(make_stack())
+    payload["schema_version"] = 1
+    for beam in payload["beams"]:
+        del beam["launch_input_mode"]
+        del beam["launch_medium_index"]
+    expected_q = tuple(
+        (beam["tilt_x_rad_per_um"], beam["tilt_y_rad_per_um"])
+        for beam in payload["beams"]
+    )
+
+    restored = beam_stack_from_dict(payload)
+
+    assert tuple(
+        (beam.tilt_x_rad_per_um, beam.tilt_y_rad_per_um)
+        for beam in restored.beams
+    ) == expected_q
+    assert all(
+        beam.launch_input_mode == "transverse_wavevector"
+        for beam in restored.beams
+    )
+    assert all(beam.launch_medium_index is None for beam in restored.beams)
+
+
+@pytest.mark.parametrize("missing", ["launch_input_mode", "launch_medium_index"])
+def test_schema_two_requires_launch_provenance_fields(missing):
+    payload = beam_stack_to_dict(make_stack())
+    del payload["beams"][0][missing]
+
+    with pytest.raises(ValueError, match="missing schema-2 fields"):
+        beam_stack_from_dict(payload)
 
 
 def test_beam_stack_json_file_round_trip(tmp_path):
@@ -92,6 +127,8 @@ def test_rejects_invalid_beam_entry():
                 "waist_y_um": 3.0,
                 "tilt_x_rad_per_um": 0.0,
                 "tilt_y_rad_per_um": 0.0,
+                "launch_medium_index": 1.0,
+                "launch_input_mode": "angle",
                 "phase_rad": 0.0,
                 "coherence_group": "laser_A",
                 "enabled": True,

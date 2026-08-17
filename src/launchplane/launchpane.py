@@ -46,34 +46,34 @@ def example_beam_stack() -> BeamStackDefinition:
 
     return BeamStackDefinition(
         beams=(
-            BeamDefinition(
+            BeamDefinition.from_launch_angles(
                 name="Probe",
                 x_um=-15.0,
                 y_um=-25.0,
                 waist_x_um=4.0,
                 waist_y_um=7.0,
-                tilt_x_rad_per_um=0.012,
-                tilt_y_rad_per_um=0.004,
+                angle_x_rad=0.012,
+                angle_y_rad=0.004,
                 coherence_group="probe",
             ),
-            BeamDefinition(
+            BeamDefinition.from_launch_angles(
                 name="Control",
                 x_um=4.0,
                 y_um=2.0,
                 waist_x_um=8.0,
                 waist_y_um=5.0,
-                tilt_x_rad_per_um=-0.006,
-                tilt_y_rad_per_um=0.018,
+                angle_x_rad=-0.006,
+                angle_y_rad=0.018,
                 coherence_group="control",
             ),
-            BeamDefinition(
+            BeamDefinition.from_launch_angles(
                 name="Reference",
                 x_um=18.0,
                 y_um=28.0,
                 waist_x_um=5.0,
                 waist_y_um=10.0,
-                tilt_x_rad_per_um=0.005,
-                tilt_y_rad_per_um=-0.014,
+                angle_x_rad=0.005,
+                angle_y_rad=-0.014,
                 coherence_group="probe",
             ),
         )
@@ -184,8 +184,37 @@ class LaunchPlaneWidget(QWidget):
         self.y_spin = self._create_spin_box(self.scene.y_min, self.scene.y_max, 3, " µm")
         self.waist_x_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
         self.waist_y_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
-        self.tilt_x_spin = self._create_spin_box(-1.0e3, 1.0e3, 6, " rad/µm")
-        self.tilt_y_spin = self._create_spin_box(-1.0e3, 1.0e3, 6, " rad/µm")
+        self.launch_input_mode_combo = QComboBox(inspector)
+        self.launch_input_mode_combo.addItem("External angles", "angle")
+        self.launch_input_mode_combo.addItem(
+            "Transverse wavevector (advanced)",
+            "transverse_wavevector",
+        )
+        self.launch_input_mode_combo.setToolTip(
+            "External angles are measured in the launch medium before the first "
+            "downstream interface. Switching modes does not change the beam."
+        )
+        angle_limit = 0.5 * 3.141592653589793 - 1.0e-6
+        self.angle_x_spin = self._create_spin_box(
+            -angle_limit, angle_limit, 8, " rad"
+        )
+        self.angle_y_spin = self._create_spin_box(
+            -angle_limit, angle_limit, 8, " rad"
+        )
+        self.launch_medium_index_spin = self._create_spin_box(0.0, 100.0, 8, "")
+        self.launch_medium_index_spin.setSpecialValueText("Unknown")
+        self.launch_medium_index_spin.setToolTip(
+            "Refractive index of the launch medium immediately before the first "
+            "downstream interface. Air is normally 1.0."
+        )
+        self.tilt_x_spin = self._create_spin_box(-1.0e3, 1.0e3, 8, " rad/µm")
+        self.tilt_y_spin = self._create_spin_box(-1.0e3, 1.0e3, 8, " rad/µm")
+        self.tilt_x_spin.setToolTip(
+            "Advanced conserved transverse wavevector / phase slope qx."
+        )
+        self.tilt_y_spin.setToolTip(
+            "Advanced conserved transverse wavevector / phase slope qy."
+        )
         self.phase_spin = self._create_spin_box(-1.0e6, 1.0e6, 6, " rad")
 
         form.addRow("Name", self.name_edit)
@@ -196,25 +225,37 @@ class LaunchPlaneWidget(QWidget):
         form.addRow("y", self.y_spin)
         form.addRow("Waist x", self.waist_x_spin)
         form.addRow("Waist y", self.waist_y_spin)
-        form.addRow("Tilt x", self.tilt_x_spin)
-        form.addRow("Tilt y", self.tilt_y_spin)
+        form.addRow("Launch input", self.launch_input_mode_combo)
+        form.addRow("Launch medium index", self.launch_medium_index_spin)
+        self.angle_x_label = QLabel("Angle x", inspector)
+        self.angle_y_label = QLabel("Angle y", inspector)
+        self.phase_slope_x_label = QLabel("Phase slope x", inspector)
+        self.phase_slope_y_label = QLabel("Phase slope y", inspector)
+        form.addRow(self.angle_x_label, self.angle_x_spin)
+        form.addRow(self.angle_y_label, self.angle_y_spin)
+        form.addRow(self.phase_slope_x_label, self.tilt_x_spin)
+        form.addRow(self.phase_slope_y_label, self.tilt_y_spin)
         form.addRow("Phase", self.phase_spin)
         form.addRow("Laser", self.laser_combo)
 
         self._numeric_editors = {
             "power_mW": self.power_spin,
-            "wavelength_um": self.wavelength_spin,
             "x_um": self.x_spin,
             "y_um": self.y_spin,
             "waist_x_um": self.waist_x_spin,
             "waist_y_um": self.waist_y_spin,
-            "tilt_x_rad_per_um": self.tilt_x_spin,
-            "tilt_y_rad_per_um": self.tilt_y_spin,
             "phase_rad": self.phase_spin,
         }
         self._inspector_editors = (
             self.name_edit,
             self.enabled_checkbox,
+            self.wavelength_spin,
+            self.launch_input_mode_combo,
+            self.launch_medium_index_spin,
+            self.angle_x_spin,
+            self.angle_y_spin,
+            self.tilt_x_spin,
+            self.tilt_y_spin,
             *self._numeric_editors.values(),
             self.laser_combo,
         )
@@ -223,6 +264,17 @@ class LaunchPlaneWidget(QWidget):
         self.laser_combo.textActivated.connect(self._laser_edited)
         self.laser_combo.lineEdit().editingFinished.connect(self._laser_edited)
         self.enabled_checkbox.toggled.connect(self._enabled_changed)
+        self.wavelength_spin.valueChanged.connect(self._wavelength_edited)
+        self.launch_input_mode_combo.currentIndexChanged.connect(
+            self._launch_input_mode_edited
+        )
+        self.launch_medium_index_spin.valueChanged.connect(
+            self._launch_medium_index_edited
+        )
+        self.angle_x_spin.valueChanged.connect(self._launch_angles_edited)
+        self.angle_y_spin.valueChanged.connect(self._launch_angles_edited)
+        self.tilt_x_spin.valueChanged.connect(self._phase_slopes_edited)
+        self.tilt_y_spin.valueChanged.connect(self._phase_slopes_edited)
         for field_name, editor in self._numeric_editors.items():
             editor.valueChanged.connect(
                 lambda value, field=field_name: self._apply_selected_changes(
@@ -293,7 +345,7 @@ class LaunchPlaneWidget(QWidget):
 
     def _place_beam(self, x_um: float, y_um: float) -> None:
         beam = replace(
-            BeamDefinition(name=self._unique_name("Beam")),
+            BeamDefinition.from_launch_angles(name=self._unique_name("Beam")),
             x_um=x_um,
             y_um=y_um,
         )
@@ -386,6 +438,67 @@ class LaunchPlaneWidget(QWidget):
             return
         self._apply_selected_changes(enabled=enabled)
 
+    def _wavelength_edited(self, wavelength_um: float) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        beam = self._beam_stack.beams[self._selected_index]
+        self._apply_selected_beam(beam.with_wavelength_um(wavelength_um))
+
+    def _launch_input_mode_edited(self, _index: int) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        mode = self.launch_input_mode_combo.currentData()
+        beam = self._beam_stack.beams[self._selected_index]
+        if mode == "angle" and beam.launch_medium_index is None:
+            # This explicit user action establishes air as the launch medium;
+            # schema-1 migration itself never does so.
+            beam = replace(beam, launch_medium_index=1.0)
+        beam = replace(beam, launch_input_mode=mode)
+        try:
+            beam.validate()
+        except ValueError:
+            # A phase slope may be non-propagating in the selected launch
+            # medium. Keep its exact advanced-mode representation instead of
+            # inventing or clipping an angle.
+            self._sync_inspector()
+            return
+        self._apply_selected_beam(beam)
+
+    def _launch_medium_index_edited(self, value: float) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        beam = self._beam_stack.beams[self._selected_index]
+        index = None if value == 0.0 else value
+        try:
+            updated = beam.with_launch_medium_index(index)
+        except ValueError:
+            self._sync_inspector()
+            return
+        self._apply_selected_beam(updated)
+
+    def _launch_angles_edited(self, _value: float) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        beam = self._beam_stack.beams[self._selected_index]
+        self._apply_selected_beam(
+            beam.with_launch_angles(
+                angle_x_rad=self.angle_x_spin.value(),
+                angle_y_rad=self.angle_y_spin.value(),
+            )
+        )
+
+    def _phase_slopes_edited(self, _value: float) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        beam = replace(
+            self._beam_stack.beams[self._selected_index],
+            tilt_x_rad_per_um=self.tilt_x_spin.value(),
+            tilt_y_rad_per_um=self.tilt_y_spin.value(),
+            launch_input_mode="transverse_wavevector",
+        )
+        beam.validate()
+        self._apply_selected_beam(beam)
+
     def _apply_selected_changes(self, **changes) -> None:
         index = self._selected_index
         if index is None or not changes:
@@ -398,9 +511,18 @@ class LaunchPlaneWidget(QWidget):
             self._sync_inspector()
             return
 
+        beam = replace(self._beam_stack.beams[index], **changes)
+        self._apply_selected_beam(beam)
+
+    def _apply_selected_beam(self, beam: BeamDefinition) -> None:
+        index = self._selected_index
+        if index is None:
+            return
+        if beam == self._beam_stack.beams[index]:
+            self._sync_inspector()
+            return
         self.cancel_placement()
         beams = list(self._beam_stack.beams)
-        beam = replace(beams[index], **changes)
         beam.validate()
         beams[index] = beam
         beam_stack = BeamStackDefinition(beams=tuple(beams))
@@ -438,6 +560,39 @@ class LaunchPlaneWidget(QWidget):
                 self.laser_combo.setCurrentText(beam.coherence_group)
                 for field_name, editor in self._numeric_editors.items():
                     editor.setValue(getattr(beam, field_name))
+                self.wavelength_spin.setValue(beam.wavelength_um)
+                mode_index = self.launch_input_mode_combo.findData(
+                    beam.launch_input_mode
+                )
+                self.launch_input_mode_combo.setCurrentIndex(mode_index)
+                self.launch_medium_index_spin.setValue(
+                    0.0
+                    if beam.launch_medium_index is None
+                    else beam.launch_medium_index
+                )
+                self.tilt_x_spin.setValue(beam.tilt_x_rad_per_um)
+                self.tilt_y_spin.setValue(beam.tilt_y_rad_per_um)
+                try:
+                    angle_x, angle_y = beam.launch_angles_rad
+                except ValueError:
+                    angle_x = angle_y = 0.0
+                self.angle_x_spin.setValue(angle_x)
+                self.angle_y_spin.setValue(angle_y)
+                angle_mode = beam.launch_input_mode == "angle"
+                for widget in (
+                    self.angle_x_label,
+                    self.angle_x_spin,
+                    self.angle_y_label,
+                    self.angle_y_spin,
+                ):
+                    widget.setVisible(angle_mode)
+                for widget in (
+                    self.phase_slope_x_label,
+                    self.tilt_x_spin,
+                    self.phase_slope_y_label,
+                    self.tilt_y_spin,
+                ):
+                    widget.setVisible(not angle_mode)
         finally:
             for editor in self._inspector_editors:
                 editor.blockSignals(False)

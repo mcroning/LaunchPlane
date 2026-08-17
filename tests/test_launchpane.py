@@ -2,11 +2,14 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
+
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QGraphicsSceneMouseEvent
 
 from launchplane.launchpane import LaunchPlaneWidget, example_beam_stack
+from launchplane.model import BeamDefinition, BeamStackDefinition
 
 
 def press_scene(scene, position: QPointF) -> None:
@@ -73,8 +76,14 @@ def test_tilt_handle_mapping_preserves_beam_position() -> None:
     after = widget.beam_stack.beams[1]
 
     assert (after.x_um, after.y_um) == (before.x_um, before.y_um)
-    assert after.tilt_x_rad_per_um == 10.0 / widget.scene.tilt_arrow_scale
-    assert after.tilt_y_rad_per_um == 25.0 / widget.scene.tilt_arrow_scale
+    assert after.angle_x_rad == pytest.approx(
+        10.0 / widget.scene.tilt_arrow_scale
+    )
+    assert after.angle_y_rad == pytest.approx(
+        25.0 / widget.scene.tilt_arrow_scale
+    )
+    assert after.tilt_x_rad_per_um > after.angle_x_rad
+    assert after.tilt_y_rad_per_um > after.angle_y_rad
     app.processEvents()
     widget.close()
 
@@ -145,6 +154,8 @@ def test_add_beam_arms_then_places_at_scene_position() -> None:
     beam = widget.beam_stack.beams[-1]
     assert beam.name == "Beam"
     assert (beam.x_um, beam.y_um) == (11.0, 17.0)
+    assert beam.launch_input_mode == "angle"
+    assert beam.launch_medium_index == 1.0
     assert widget.object_list.currentRow() == len(before.beams)
     assert widget.scene.beam_items[-1].isSelected()
     assert not widget.scene.add_mode
@@ -214,8 +225,130 @@ def test_canvas_edits_update_inspector_values() -> None:
     drag_event = QGraphicsSceneMouseEvent(QEvent.GraphicsSceneMouseMove)
     drag_event.setScenePos(item.scenePos() + QPointF(-20.0, 15.0))
     item._tilt_handle.mouseMoveEvent(drag_event)
-    assert widget.tilt_x_spin.value() == -15.0 / widget.scene.tilt_arrow_scale
-    assert widget.tilt_y_spin.value() == -20.0 / widget.scene.tilt_arrow_scale
+    assert widget.angle_x_spin.value() == -15.0 / widget.scene.tilt_arrow_scale
+    assert widget.angle_y_spin.value() == -20.0 / widget.scene.tilt_arrow_scale
+    app.processEvents()
+    widget.close()
+
+
+def test_normal_editor_uses_external_angles_and_air_default() -> None:
+    app = QApplication.instance() or QApplication([])
+    widget = LaunchPlaneWidget(beam_stack=example_beam_stack())
+    widget.object_list.setCurrentRow(0)
+
+    beam = widget.beam_stack.beams[0]
+    assert beam.launch_input_mode == "angle"
+    assert beam.launch_medium_index == 1.0
+    assert widget.angle_x_label.text() == "Angle x"
+    assert widget.angle_x_spin.suffix() == " rad"
+    assert widget.launch_medium_index_spin.value() == 1.0
+    assert not widget.angle_x_spin.isHidden()
+    assert widget.tilt_x_spin.isHidden()
+    assert "before the first downstream interface" in (
+        widget.launch_medium_index_spin.toolTip()
+    )
+    widget.angle_y_spin.setValue(0.0)
+    widget.angle_x_spin.setValue(0.1)
+    assert widget.beam_stack.beams[0].tilt_x_rad_per_um == pytest.approx(
+        0.9909508004,
+        abs=5e-11,
+    )
+    app.processEvents()
+    widget.close()
+
+
+def test_switching_editor_mode_preserves_physical_wavevector() -> None:
+    app = QApplication.instance() or QApplication([])
+    widget = LaunchPlaneWidget(beam_stack=example_beam_stack())
+    widget.object_list.setCurrentRow(0)
+    before = widget.beam_stack.beams[0]
+
+    widget.launch_input_mode_combo.setCurrentIndex(
+        widget.launch_input_mode_combo.findData("transverse_wavevector")
+    )
+    after = widget.beam_stack.beams[0]
+
+    assert after.launch_input_mode == "transverse_wavevector"
+    assert after.tilt_x_rad_per_um == before.tilt_x_rad_per_um
+    assert after.tilt_y_rad_per_um == before.tilt_y_rad_per_um
+    assert widget.phase_slope_x_label.text() == "Phase slope x"
+    assert not widget.tilt_x_spin.isHidden()
+    assert widget.angle_x_spin.isHidden()
+    app.processEvents()
+    widget.close()
+
+
+def test_legacy_unknown_medium_remains_unknown_until_explicit_angle_mode() -> None:
+    app = QApplication.instance() or QApplication([])
+    legacy = BeamDefinition(
+        name="legacy",
+        tilt_x_rad_per_um=0.1,
+        launch_medium_index=None,
+        launch_input_mode="transverse_wavevector",
+    )
+    widget = LaunchPlaneWidget(
+        beam_stack=BeamStackDefinition(beams=(legacy,))
+    )
+    widget.object_list.setCurrentRow(0)
+
+    assert widget.launch_medium_index_spin.specialValueText() == "Unknown"
+    assert widget.launch_medium_index_spin.value() == 0.0
+    widget.launch_input_mode_combo.setCurrentIndex(
+        widget.launch_input_mode_combo.findData("angle")
+    )
+
+    after = widget.beam_stack.beams[0]
+    assert after.launch_input_mode == "angle"
+    assert after.launch_medium_index == 1.0
+    assert after.tilt_x_rad_per_um == legacy.tilt_x_rad_per_um
+    app.processEvents()
+    widget.close()
+
+
+def test_nonpropagating_wavevector_cannot_be_relabelled_as_an_angle() -> None:
+    app = QApplication.instance() or QApplication([])
+    beam = BeamDefinition(
+        name="evanescent-in-air",
+        tilt_x_rad_per_um=20.0,
+        launch_medium_index=1.0,
+        launch_input_mode="transverse_wavevector",
+    )
+    widget = LaunchPlaneWidget(
+        beam_stack=BeamStackDefinition(beams=(beam,))
+    )
+    widget.object_list.setCurrentRow(0)
+
+    widget.launch_input_mode_combo.setCurrentIndex(
+        widget.launch_input_mode_combo.findData("angle")
+    )
+
+    assert widget.beam_stack.beams[0] == beam
+    assert widget.launch_input_mode_combo.currentData() == "transverse_wavevector"
+    app.processEvents()
+    widget.close()
+
+
+def test_canvas_advanced_mode_preserves_phase_slope_signs() -> None:
+    app = QApplication.instance() or QApplication([])
+    beam = BeamDefinition(
+        name="advanced",
+        launch_medium_index=None,
+        launch_input_mode="transverse_wavevector",
+    )
+    widget = LaunchPlaneWidget(
+        beam_stack=BeamStackDefinition(beams=(beam,))
+    )
+    widget.object_list.setCurrentRow(0)
+    item = widget.scene.beam_items[0]
+    drag_event = QGraphicsSceneMouseEvent(QEvent.GraphicsSceneMouseMove)
+    drag_event.setScenePos(item.scenePos() + QPointF(-25.0, 10.0))
+
+    item._tilt_handle.mouseMoveEvent(drag_event)
+    after = widget.beam_stack.beams[0]
+
+    assert after.tilt_x_rad_per_um == -10.0 / widget.scene.tilt_arrow_scale
+    assert after.tilt_y_rad_per_um == -25.0 / widget.scene.tilt_arrow_scale
+    assert after.launch_medium_index is None
     app.processEvents()
     widget.close()
 
