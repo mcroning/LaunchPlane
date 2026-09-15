@@ -10,8 +10,8 @@ The normal editor specifies external launch angles in radians. These angles
 are measured in the LaunchPlane launch medium immediately before the first
 downstream optical or material interface. Air, with launch-medium refractive
 index `1.0`, is the default for newly created angle-mode beams. They are not
-internal crystal angles, and LaunchPlane does not calculate downstream
-refraction.
+angles inside a downstream medium, and LaunchPlane does not calculate
+downstream refraction.
 
 Each beam's `wavelength_um` is its vacuum wavelength. LaunchPlane converts the
 external projected-plane angles to the conserved transverse wavevector
@@ -33,20 +33,24 @@ Schema version 3 distinguishes four launch profiles:
   `waist_y_um` are entrance-plane 1/e field radii;
 - `collimated_gaussian`: a finite entrance-plane Gaussian with a flat
   wavefront;
-- `uniform`: a constant entrance-plane amplitude (with only exact periodic
-  Fourier-mode tilts permitted);
+- `uniform`: a constant entrance-plane amplitude;
 - `focused_gaussian`: a Gaussian specified by its x/y 1/e field radii at the
   waist and the waist position.
 
-For a focused Gaussian, `focus_z_um=0` is the crystal entrance plane. Positive
-values place the waist downstream along the application's selected propagation
-coordinate; negative values place it upstream. The application supplies a
-material-neutral optical context containing the propagation index, interaction
-length, and propagation sign. The sign maps the selected propagation
-coordinate to the signed z increment used by the propagator; it does not
-reinterpret a positive focus position as upstream. The midpoint convenience
-places the waist at half the supplied interaction length and makes an explicit
-`focus_z_um` unnecessary.
+LaunchPlane records beam intent and visualizes the launch plane, but it does not
+know the consuming application's propagation grid. For a tilted uniform or
+plane-wave field on a periodic grid, the consuming application must enforce
+exact compatibility with its discrete periodic Fourier modes.
+
+For a focused Gaussian, `focus_z_um=0` is the application's interaction
+entrance plane. Positive values place the waist downstream along the
+application's selected propagation coordinate; negative values place it
+upstream. The application supplies a material-neutral optical context
+containing the propagation index, interaction length, and propagation sign.
+The sign maps the selected propagation coordinate to the signed z increment
+used by the propagator; it does not reinterpret a positive focus position as
+upstream. The midpoint convenience places the waist at half the supplied
+interaction length and makes an explicit `focus_z_um` unnecessary.
 
 When that context is available, the solid canvas ellipse is the derived beam
 footprint at the entrance. A dotted ellipse is only a centered size reference
@@ -80,6 +84,14 @@ python -m pip install -e .
 The current runtime dependency is PySide6, which is installed through the
 package metadata.
 
+LaunchPlane requires Python 3.11 or newer. To install the test runner and run
+the standalone test suite:
+
+```bash
+python -m pip install pytest
+python -m pytest
+```
+
 ## Current import
 
 The currently supported import for the primary GUI component is:
@@ -89,6 +101,28 @@ from launchplane.launchpane import LaunchPlaneWidget
 ```
 
 No package-level re-export is currently provided.
+
+## Standalone example
+
+The widget can be created and displayed without LCProp:
+
+```python
+from PySide6.QtWidgets import QApplication
+
+from launchplane.launchpane import LaunchPlaneWidget
+from launchplane.model import BeamDefinition, BeamStackDefinition
+
+app = QApplication([])
+beams = BeamStackDefinition(
+    beams=(
+        BeamDefinition(name="Signal", x_um=-5.0, y_um=2.0),
+        BeamDefinition(name="Pump", x_um=5.0, y_um=-2.0),
+    )
+)
+widget = LaunchPlaneWidget(beam_stack=beams)
+widget.show()
+app.exec()
+```
 
 ## Naming
 

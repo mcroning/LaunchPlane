@@ -154,12 +154,13 @@ class BeamDefinition:
     """
     One scalar optical beam.
 
-    Coordinates use the LaunchPlane convention:
+    Coordinates use the LaunchPlane canvas convention:
 
-        x : LC thickness (vertical)
-        y : transverse (horizontal)
+        x : first transverse coordinate (vertical)
+        y : second transverse coordinate (horizontal)
 
-    All lengths are in microns.
+    The consuming application defines how these transverse coordinates map to
+    its physical system. All lengths are in microns.
     """
 
     name: str = "Beam"
