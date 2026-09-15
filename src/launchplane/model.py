@@ -14,6 +14,60 @@ import math
 
 
 LaunchInputMode = Literal["angle", "transverse_wavevector"]
+BeamProfile = Literal[
+    "legacy_gaussian",
+    "focused_gaussian",
+    "collimated_gaussian",
+    "uniform",
+]
+
+
+def focused_gaussian_entrance_geometry(
+    beam: "BeamDefinition",
+    *,
+    n_ref: float,
+    interaction_length_um: float,
+    propagation_sign: int = 1,
+) -> tuple[float, float, float, float, float]:
+    """Return ``(focus_z, wx, wy, Rx, Ry)`` at the entrance plane.
+
+    ``focus_z_um`` is a signed distance from the entrance along the selected
+    propagation coordinate. Positive values are downstream and negative
+    values are upstream; ``propagation_sign`` maps that coordinate to the
+    signed z increment used by the downstream propagator.
+    """
+
+    beam.validate()
+    index = _finite(n_ref, name="n_ref")
+    length = _finite(interaction_length_um, name="interaction_length_um")
+    if index <= 0.0 or length <= 0.0:
+        raise ValueError("n_ref and interaction_length_um must be positive")
+    if propagation_sign not in (-1, 1):
+        raise ValueError("propagation_sign must be -1 or 1")
+    if beam.profile != "focused_gaussian":
+        raise ValueError("entrance geometry requires focused_gaussian")
+    focus_z = (
+        0.5 * length
+        if beam.focus_at_interaction_midpoint
+        else float(beam.focus_z_um)
+    )
+    distance = -int(propagation_sign) * focus_z
+    k_ref = 2.0 * math.pi * index / float(beam.wavelength_um)
+
+    def axis(waist_value: float) -> tuple[float, float]:
+        waist = float(waist_value)
+        rayleigh = 0.5 * k_ref * waist * waist
+        radius = waist * math.sqrt(1.0 + (distance / rayleigh) ** 2)
+        curvature = (
+            math.inf
+            if distance == 0.0
+            else distance * (1.0 + (rayleigh / distance) ** 2)
+        )
+        return radius, curvature
+
+    wx, rx = axis(beam.waist_x_at_focus_um)
+    wy, ry = axis(beam.waist_y_at_focus_um)
+    return focus_z, wx, wy, rx, ry
 
 
 def _finite(value: float, *, name: str) -> float:
@@ -130,6 +184,15 @@ class BeamDefinition:
     coherence_group: str = "laser_A"
 
     enabled: bool = True
+
+    # Appended fields preserve the historical positional constructor and
+    # schema migrations. LaunchPlane stores optical intent only; downstream
+    # applications supply the propagation index and interaction geometry.
+    profile: BeamProfile = "legacy_gaussian"
+    waist_x_at_focus_um: float | None = None
+    waist_y_at_focus_um: float | None = None
+    focus_z_um: float | None = None
+    focus_at_interaction_midpoint: bool = False
 
     @classmethod
     def from_launch_angles(
@@ -305,6 +368,46 @@ class BeamDefinition:
         if self.waist_y_um <= 0:
             raise ValueError("waist_y_um must be positive")
 
+        if self.profile not in (
+            "legacy_gaussian",
+            "focused_gaussian",
+            "collimated_gaussian",
+            "uniform",
+        ):
+            raise ValueError("unsupported beam profile")
+        focus_waists = (self.waist_x_at_focus_um, self.waist_y_at_focus_um)
+        if self.profile == "focused_gaussian":
+            if any(value is None for value in focus_waists):
+                raise ValueError(
+                    "focused_gaussian requires waist_x_at_focus_um and "
+                    "waist_y_at_focus_um"
+                )
+            for name, value in zip(
+                ("waist_x_at_focus_um", "waist_y_at_focus_um"), focus_waists
+            ):
+                if _finite(value, name=name) <= 0.0:
+                    raise ValueError(f"{name} must be positive")
+            if self.focus_at_interaction_midpoint:
+                if self.focus_z_um is not None:
+                    raise ValueError(
+                        "focus_z_um must be omitted when "
+                        "focus_at_interaction_midpoint is true"
+                    )
+            elif self.focus_z_um is None:
+                raise ValueError(
+                    "focused_gaussian requires focus_z_um or midpoint focus"
+                )
+            else:
+                _finite(self.focus_z_um, name="focus_z_um")
+        elif (
+            any(value is not None for value in focus_waists)
+            or self.focus_z_um is not None
+            or self.focus_at_interaction_midpoint
+        ):
+            raise ValueError(
+                "focus-plane parameters are available only for focused_gaussian"
+            )
+
         if not self.coherence_group.strip():
             raise ValueError("coherence_group must be non-empty")
 
@@ -393,6 +496,8 @@ class LaunchPlaneDefinition:
 
 
 __all__ = [
+    "BeamProfile",
+    "focused_gaussian_entrance_geometry",
     "BeamDefinition",
     "BeamStackDefinition",
     "LaunchInputMode",

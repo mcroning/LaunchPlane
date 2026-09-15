@@ -25,6 +25,42 @@ Legacy schema-version-1 records are loaded in that advanced mode with an
 unknown launch medium, preserving their stored phase slopes exactly without
 assuming that they originated in air.
 
+## Beam profiles and focus semantics
+
+Schema version 3 distinguishes four launch profiles:
+
+- `legacy_gaussian`: the historical Gaussian whose `waist_x_um` and
+  `waist_y_um` are entrance-plane 1/e field radii;
+- `collimated_gaussian`: a finite entrance-plane Gaussian with a flat
+  wavefront;
+- `uniform`: a constant entrance-plane amplitude (with only exact periodic
+  Fourier-mode tilts permitted);
+- `focused_gaussian`: a Gaussian specified by its x/y 1/e field radii at the
+  waist and the waist position.
+
+For a focused Gaussian, `focus_z_um=0` is the crystal entrance plane. Positive
+values place the waist downstream along the application's selected propagation
+coordinate; negative values place it upstream. The application supplies a
+material-neutral optical context containing the propagation index, interaction
+length, and propagation sign. The sign maps the selected propagation
+coordinate to the signed z increment used by the propagator; it does not
+reinterpret a positive focus position as upstream. The midpoint convenience
+places the waist at half the supplied interaction length and makes an explicit
+`focus_z_um` unnecessary.
+
+When that context is available, the solid canvas ellipse is the derived beam
+footprint at the entrance. A dotted ellipse is only a centered size reference
+for the requested waist at its focus; it does not represent another field at
+the entrance plane. The inspector reports both radii, the focus position,
+entrance curvature, and an estimated peak-normalized intensity at the nearest
+aperture edge. A periodic boundary makes significant edge intensity a
+wraparound warning, while a sponge policy presents it as intentional edge
+absorption information. Boundary treatment itself remains owned by the host
+propagator, not LaunchPlane.
+
+Schema versions 1 and 2 remain readable and migrate to `legacy_gaussian`, so
+their entrance-plane semantics do not change.
+
 ## Project status
 
 LaunchPlane is experimental, developmental, and pre-release software. Its API

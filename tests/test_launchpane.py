@@ -9,7 +9,11 @@ from PySide6.QtGui import QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QGraphicsSceneMouseEvent
 
 from launchplane.launchpane import LaunchPlaneWidget, example_beam_stack
-from launchplane.model import BeamDefinition, BeamStackDefinition
+from launchplane.model import (
+    BeamDefinition,
+    BeamStackDefinition,
+    focused_gaussian_entrance_geometry,
+)
 
 
 def press_scene(scene, position: QPointF) -> None:
@@ -208,6 +212,87 @@ def test_inspector_edits_update_stack_canvas_and_object_list() -> None:
     assert item.pos() == QPointF(beam.y_um, -beam.x_um)
     assert "Updated probe" in widget.object_list.item(0).text()
     assert "new_group" in widget.object_list.item(0).text()
+    app.processEvents()
+    widget.close()
+
+
+def test_focused_profile_editor_preserves_explicit_optical_intent() -> None:
+    app = QApplication.instance() or QApplication([])
+    widget = LaunchPlaneWidget(beam_stack=example_beam_stack())
+    widget.object_list.setCurrentRow(0)
+
+    widget.profile_combo.setCurrentIndex(
+        widget.profile_combo.findData("focused_gaussian")
+    )
+    widget.focus_waist_x_spin.setValue(4.5)
+    widget.focus_waist_y_spin.setValue(7.5)
+    widget.focus_z_spin.setValue(32.0)
+    beam = widget.beam_stack.beams[0]
+    assert beam.profile == "focused_gaussian"
+    assert beam.waist_x_at_focus_um == 4.5
+    assert beam.waist_y_at_focus_um == 7.5
+    assert beam.focus_z_um == 32.0
+    assert beam.focus_at_interaction_midpoint is False
+    assert not widget.focus_waist_x_spin.isHidden()
+    assert widget.waist_x_spin.isHidden()
+
+    widget.focus_midpoint_checkbox.setChecked(True)
+    beam = widget.beam_stack.beams[0]
+    assert beam.focus_z_um is None
+    assert beam.focus_at_interaction_midpoint is True
+    assert not widget.focus_z_spin.isEnabled()
+    app.processEvents()
+    widget.close()
+
+
+def test_focused_visualization_uses_entrance_footprint_and_reports_aperture_fit(
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    beam = BeamDefinition(
+        name="focused",
+        x_um=43.0,
+        profile="focused_gaussian",
+        waist_x_at_focus_um=4.5,
+        waist_y_at_focus_um=7.5,
+        focus_z_um=-32.0,
+    )
+    widget = LaunchPlaneWidget(
+        beam_stack=BeamStackDefinition(beams=(beam,))
+    )
+    widget.object_list.setCurrentRow(0)
+    widget.set_optical_context(
+        n_ref=2.3,
+        interaction_length_um=80.0,
+        propagation_sign=1,
+        boundary_mode="periodic",
+    )
+    _, expected_x, expected_y, _, _ = focused_gaussian_entrance_geometry(
+        beam,
+        n_ref=2.3,
+        interaction_length_um=80.0,
+        propagation_sign=1,
+    )
+
+    assert widget.scene.beam_items[0]._entrance_waists() == pytest.approx(
+        (expected_x, expected_y)
+    )
+    assert widget.scene.beam_items[0].isSelected()
+    assert "dotted focus-waist reference=(4.5, 7.5) µm" in (
+        widget.entrance_geometry.text()
+    )
+    assert "focus z=-32" in widget.entrance_geometry.text()
+    assert "entrance radii=" in widget.entrance_geometry.text()
+    assert "Warning" in widget.aperture_fit.text()
+    assert "periodic boundary" in widget.aperture_fit.text()
+
+    widget.set_optical_context(
+        n_ref=2.3,
+        interaction_length_um=80.0,
+        propagation_sign=1,
+        boundary_mode="sponge",
+    )
+    assert "Sponge boundary" in widget.aperture_fit.text()
+    assert "edge intensity=" in widget.aperture_fit.text()
     app.processEvents()
     widget.close()
 

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from launchplane.model import BeamDefinition, BeamStackDefinition
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def beam_stack_to_dict(stack: BeamStackDefinition) -> dict[str, Any]:
@@ -27,9 +27,10 @@ def beam_stack_from_dict(data: Mapping[str, Any]) -> BeamStackDefinition:
         raise TypeError("Serialized beam stack must be a mapping")
 
     version = data.get("schema_version")
-    if version not in (1, SCHEMA_VERSION):
+    if version not in (1, 2, SCHEMA_VERSION):
         raise ValueError(
-            f"Unsupported schema_version {version!r}; expected 1 or {SCHEMA_VERSION}"
+            f"Unsupported schema_version {version!r}; expected 1, 2, or "
+            f"{SCHEMA_VERSION}"
         )
 
     beam_items = data.get("beams")
@@ -47,7 +48,7 @@ def beam_stack_from_dict(data: Mapping[str, Any]) -> BeamStackDefinition:
             # from an air launch angle.
             beam_data["launch_medium_index"] = None
             beam_data["launch_input_mode"] = "transverse_wavevector"
-        else:
+        elif version == 2:
             missing = {
                 "launch_medium_index",
                 "launch_input_mode",
@@ -56,6 +57,28 @@ def beam_stack_from_dict(data: Mapping[str, Any]) -> BeamStackDefinition:
                 names = ", ".join(sorted(missing))
                 raise ValueError(
                     f"Invalid beam entry {index}: missing schema-2 fields: {names}"
+                )
+            beam_data.update(
+                profile="legacy_gaussian",
+                waist_x_at_focus_um=None,
+                waist_y_at_focus_um=None,
+                focus_z_um=None,
+                focus_at_interaction_midpoint=False,
+            )
+        else:
+            missing = {
+                "launch_medium_index",
+                "launch_input_mode",
+                "profile",
+                "waist_x_at_focus_um",
+                "waist_y_at_focus_um",
+                "focus_z_um",
+                "focus_at_interaction_midpoint",
+            }.difference(beam_data)
+            if missing:
+                names = ", ".join(sorted(missing))
+                raise ValueError(
+                    f"Invalid beam entry {index}: missing schema-3 fields: {names}"
                 )
         try:
             beam = BeamDefinition(**beam_data)

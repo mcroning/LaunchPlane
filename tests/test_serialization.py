@@ -45,6 +45,29 @@ def make_stack() -> BeamStackDefinition:
     )
 
 
+def test_old_positional_constructor_remains_stable():
+    beam = BeamDefinition(
+        "old",
+        0.532,
+        2.0,
+        1.0,
+        -2.0,
+        4.0,
+        5.0,
+        0.1,
+        -0.2,
+        None,
+        "transverse_wavevector",
+        0.3,
+        "laser",
+        False,
+    )
+
+    assert beam.enabled is False
+    assert beam.profile == "legacy_gaussian"
+    assert beam.waist_x_at_focus_um is None
+
+
 def test_beam_stack_dict_round_trip():
     stack = make_stack()
 
@@ -57,12 +80,32 @@ def test_beam_stack_dict_round_trip():
     assert payload["beams"][0]["launch_medium_index"] is None
 
 
+def test_focused_profile_round_trips_in_current_schema():
+    stack = BeamStackDefinition(
+        beams=(
+            BeamDefinition(
+                profile="focused_gaussian",
+                waist_x_at_focus_um=4.0,
+                waist_y_at_focus_um=8.0,
+                focus_at_interaction_midpoint=True,
+            ),
+        )
+    )
+
+    assert beam_stack_from_dict(beam_stack_to_dict(stack)) == stack
+
+
 def test_schema_one_migration_preserves_phase_slopes_and_unknown_medium():
     payload = beam_stack_to_dict(make_stack())
     payload["schema_version"] = 1
     for beam in payload["beams"]:
         del beam["launch_input_mode"]
         del beam["launch_medium_index"]
+        del beam["profile"]
+        del beam["waist_x_at_focus_um"]
+        del beam["waist_y_at_focus_um"]
+        del beam["focus_z_um"]
+        del beam["focus_at_interaction_midpoint"]
     expected_q = tuple(
         (beam["tilt_x_rad_per_um"], beam["tilt_y_rad_per_um"])
         for beam in payload["beams"]
@@ -79,11 +122,35 @@ def test_schema_one_migration_preserves_phase_slopes_and_unknown_medium():
         for beam in restored.beams
     )
     assert all(beam.launch_medium_index is None for beam in restored.beams)
+    assert all(beam.profile == "legacy_gaussian" for beam in restored.beams)
+
+
+def test_schema_two_migration_preserves_legacy_entrance_gaussian_semantics():
+    payload = beam_stack_to_dict(make_stack())
+    payload["schema_version"] = 2
+    for beam in payload["beams"]:
+        del beam["profile"]
+        del beam["waist_x_at_focus_um"]
+        del beam["waist_y_at_focus_um"]
+        del beam["focus_z_um"]
+        del beam["focus_at_interaction_midpoint"]
+
+    restored = beam_stack_from_dict(payload)
+
+    assert all(beam.profile == "legacy_gaussian" for beam in restored.beams)
+    assert all(beam.waist_x_at_focus_um is None for beam in restored.beams)
 
 
 @pytest.mark.parametrize("missing", ["launch_input_mode", "launch_medium_index"])
 def test_schema_two_requires_launch_provenance_fields(missing):
     payload = beam_stack_to_dict(make_stack())
+    payload["schema_version"] = 2
+    for beam in payload["beams"]:
+        del beam["profile"]
+        del beam["waist_x_at_focus_um"]
+        del beam["waist_y_at_focus_um"]
+        del beam["focus_z_um"]
+        del beam["focus_at_interaction_midpoint"]
     del payload["beams"][0][missing]
 
     with pytest.raises(ValueError, match="missing schema-2 fields"):
@@ -132,6 +199,11 @@ def test_rejects_invalid_beam_entry():
                 "phase_rad": 0.0,
                 "coherence_group": "laser_A",
                 "enabled": True,
+                "profile": "legacy_gaussian",
+                "waist_x_at_focus_um": None,
+                "waist_y_at_focus_um": None,
+                "focus_z_um": None,
+                "focus_at_interaction_midpoint": False,
             }
         ],
     }

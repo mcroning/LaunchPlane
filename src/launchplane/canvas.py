@@ -24,7 +24,12 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
-from launchplane.model import BeamDefinition, BeamStackDefinition, LaunchPlaneDefinition
+from launchplane.model import (
+    BeamDefinition,
+    BeamStackDefinition,
+    LaunchPlaneDefinition,
+    focused_gaussian_entrance_geometry,
+)
 
 
 class BeamItem(QGraphicsObject):
@@ -40,12 +45,14 @@ class BeamItem(QGraphicsObject):
         beam: BeamDefinition,
         *,
         tilt_arrow_scale: float = 500.0,
+        optical_context: tuple[float, float, int] | None = None,
         parent: QGraphicsItem | None = None,
     ):
         super().__init__(parent)
         self.index = int(index)
         self.beam = beam
         self.tilt_arrow_scale = float(tilt_arrow_scale)
+        self.optical_context = optical_context
         self._hovered = False
 
         self.setFlags(
@@ -122,8 +129,9 @@ class BeamItem(QGraphicsObject):
             )
 
     def boundingRect(self) -> QRectF:
-        waist_y = max(6.0, float(self.beam.waist_y_um))
-        waist_x = max(6.0, float(self.beam.waist_x_um))
+        waist_x, waist_y = self._entrance_waists()
+        waist_y = max(6.0, waist_y)
+        waist_x = max(6.0, waist_x)
         tip = self.tilt_tip_offset()
         arrow_dx = tip.x()
         arrow_dy = tip.y()
@@ -134,13 +142,14 @@ class BeamItem(QGraphicsObject):
         return QRectF(left, top, right - left, bottom - top)
 
     def shape(self) -> QPainterPath:
+        waist_x, waist_y = self._entrance_waists()
         path = QPainterPath()
         path.addEllipse(
             QRectF(
-                -self.beam.waist_y_um,
-                -self.beam.waist_x_um,
-                2.0 * self.beam.waist_y_um,
-                2.0 * self.beam.waist_x_um,
+                -waist_y,
+                -waist_x,
+                2.0 * waist_y,
+                2.0 * waist_x,
             )
         )
         return path
@@ -156,12 +165,8 @@ class BeamItem(QGraphicsObject):
         if not self.beam.enabled:
             color = QColor(120, 120, 120)
 
-        waist_rect = QRectF(
-            -self.beam.waist_y_um,
-            -self.beam.waist_x_um,
-            2.0 * self.beam.waist_y_um,
-            2.0 * self.beam.waist_x_um,
-        )
+        waist_x, waist_y = self._entrance_waists()
+        waist_rect = QRectF(-waist_y, -waist_x, 2.0 * waist_y, 2.0 * waist_x)
 
         fill = QColor(color)
         fill.setAlpha(45 if self.beam.enabled else 20)
@@ -170,7 +175,36 @@ class BeamItem(QGraphicsObject):
         painter.setPen(waist_pen)
         painter.setBrush(QBrush(fill))
         painter.drawEllipse(waist_rect)
+        if self.beam.profile == "focused_gaussian":
+            focus_x = float(self.beam.waist_x_at_focus_um)
+            focus_y = float(self.beam.waist_y_at_focus_um)
+            focus_pen = QPen(color, 1.2, Qt.DotLine)
+            focus_pen.setCosmetic(True)
+            painter.setPen(focus_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(
+                QRectF(-focus_y, -focus_x, 2.0 * focus_y, 2.0 * focus_x)
+            )
         self._paint_tilt_arrow(painter)
+
+    def _entrance_waists(self) -> tuple[float, float]:
+        """Return radii of the field that physically occupies the entrance."""
+
+        if self.beam.profile == "focused_gaussian" and self.optical_context is not None:
+            n_ref, length, sign = self.optical_context
+            _, wx, wy, _, _ = focused_gaussian_entrance_geometry(
+                self.beam,
+                n_ref=n_ref,
+                interaction_length_um=length,
+                propagation_sign=sign,
+            )
+            return wx, wy
+        if self.beam.profile == "focused_gaussian":
+            return (
+                float(self.beam.waist_x_at_focus_um),
+                float(self.beam.waist_y_at_focus_um),
+            )
+        return float(self.beam.waist_x_um), float(self.beam.waist_y_um)
 
     def _paint_tilt_arrow(self, painter: QPainter) -> None:
         tip = self.tilt_tip_offset()
@@ -325,6 +359,7 @@ class LaunchPlaneScene(QGraphicsScene):
         self.tilt_arrow_scale = float(tilt_arrow_scale)
         self.add_mode = False
         self.beam_items: list[BeamItem] = []
+        self.optical_context: tuple[float, float, int] | None = None
         self.setBackgroundBrush(QBrush(QColor(28, 31, 36)))
         self._draw_static_scene()
 
@@ -354,12 +389,31 @@ class LaunchPlaneScene(QGraphicsScene):
         stack.validate()
         self._draw_static_scene()
         for index, beam in enumerate(stack.beams):
-            item = BeamItem(index, beam, tilt_arrow_scale=self.tilt_arrow_scale)
+            item = BeamItem(
+                index,
+                beam,
+                tilt_arrow_scale=self.tilt_arrow_scale,
+                optical_context=self.optical_context,
+            )
             item.moved.connect(self.beamMoved)
             item.changed.connect(self.beamChanged)
             item.selected.connect(self.beamSelected)
             self.addItem(item)
             self.beam_items.append(item)
+
+    def set_optical_context(
+        self, *, n_ref: float, interaction_length_um: float, propagation_sign: int = 1
+    ) -> None:
+        optical_context = (
+            float(n_ref),
+            float(interaction_length_um),
+            int(propagation_sign),
+        )
+        self.optical_context = optical_context
+        for item in self.beam_items:
+            item.prepareGeometryChange()
+            item.optical_context = optical_context
+            item.update()
 
     def stack(self) -> BeamStackDefinition:
         beams: list[BeamDefinition] = []

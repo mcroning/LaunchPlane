@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import replace
 
@@ -27,7 +28,12 @@ from PySide6.QtWidgets import (
 )
 
 from launchplane.canvas import LaunchPlaneScene, LaunchPlaneView
-from launchplane.model import BeamDefinition, BeamStackDefinition, LaunchPlaneDefinition
+from launchplane.model import (
+    BeamDefinition,
+    BeamStackDefinition,
+    LaunchPlaneDefinition,
+    focused_gaussian_entrance_geometry,
+)
 
 
 def _increase_font_size(widget: QWidget, points: float) -> None:
@@ -159,13 +165,14 @@ class LaunchPlaneWidget(QWidget):
         self.cancel_shortcut.activated.connect(self.cancel_placement)
 
         self._beam_stack = BeamStackDefinition()
+        self._boundary_mode = "periodic"
         self.set_beam_stack(beam_stack or BeamStackDefinition())
 
     def _create_inspector(self) -> QGroupBox:
         inspector = QGroupBox("Selected beam", self)
         form = QFormLayout(inspector)
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(4)
+        form.setVerticalSpacing(2)
 
         self.name_edit = QLineEdit(inspector)
         self.enabled_checkbox = QCheckBox(inspector)
@@ -184,6 +191,19 @@ class LaunchPlaneWidget(QWidget):
         self.y_spin = self._create_spin_box(self.scene.y_min, self.scene.y_max, 3, " µm")
         self.waist_x_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
         self.waist_y_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
+        self.profile_combo = QComboBox(inspector)
+        self.profile_combo.addItem("Legacy entrance Gaussian", "legacy_gaussian")
+        self.profile_combo.addItem("Focused Gaussian", "focused_gaussian")
+        self.profile_combo.addItem("Collimated Gaussian", "collimated_gaussian")
+        self.profile_combo.addItem("Uniform / plane wave", "uniform")
+        self.focus_waist_x_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
+        self.focus_waist_y_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
+        self.focus_z_spin = self._create_spin_box(-1.0e6, 1.0e6, 3, " µm")
+        self.focus_midpoint_checkbox = QCheckBox(inspector)
+        self.entrance_geometry = QLabel(inspector)
+        self.entrance_geometry.setWordWrap(True)
+        self.aperture_fit = QLabel(inspector)
+        self.aperture_fit.setWordWrap(True)
         self.launch_input_mode_combo = QComboBox(inspector)
         self.launch_input_mode_combo.addItem("External angles", "angle")
         self.launch_input_mode_combo.addItem(
@@ -223,8 +243,23 @@ class LaunchPlaneWidget(QWidget):
         form.addRow("Wavelength", self.wavelength_spin)
         form.addRow("x", self.x_spin)
         form.addRow("y", self.y_spin)
-        form.addRow("Waist x", self.waist_x_spin)
-        form.addRow("Waist y", self.waist_y_spin)
+        self.waist_x_label = QLabel("Entrance waist x", inspector)
+        self.waist_y_label = QLabel("Entrance waist y", inspector)
+        form.addRow(self.waist_x_label, self.waist_x_spin)
+        form.addRow(self.waist_y_label, self.waist_y_spin)
+        form.addRow("Beam profile", self.profile_combo)
+        self.focus_waist_x_label = QLabel("Waist x at focus", inspector)
+        self.focus_waist_y_label = QLabel("Waist y at focus", inspector)
+        self.focus_z_label = QLabel("Focus z", inspector)
+        self.focus_midpoint_label = QLabel("Focus at interaction midpoint", inspector)
+        form.addRow(self.focus_waist_x_label, self.focus_waist_x_spin)
+        form.addRow(self.focus_waist_y_label, self.focus_waist_y_spin)
+        form.addRow(self.focus_z_label, self.focus_z_spin)
+        form.addRow(self.focus_midpoint_label, self.focus_midpoint_checkbox)
+        self.entrance_geometry_label = QLabel("Entrance geometry", inspector)
+        self.aperture_fit_label = QLabel("Aperture fit", inspector)
+        form.addRow(self.entrance_geometry_label, self.entrance_geometry)
+        form.addRow(self.aperture_fit_label, self.aperture_fit)
         form.addRow("Launch input", self.launch_input_mode_combo)
         form.addRow("Launch medium index", self.launch_medium_index_spin)
         self.angle_x_label = QLabel("Angle x", inspector)
@@ -250,6 +285,11 @@ class LaunchPlaneWidget(QWidget):
             self.name_edit,
             self.enabled_checkbox,
             self.wavelength_spin,
+            self.profile_combo,
+            self.focus_waist_x_spin,
+            self.focus_waist_y_spin,
+            self.focus_z_spin,
+            self.focus_midpoint_checkbox,
             self.launch_input_mode_combo,
             self.launch_medium_index_spin,
             self.angle_x_spin,
@@ -265,6 +305,11 @@ class LaunchPlaneWidget(QWidget):
         self.laser_combo.lineEdit().editingFinished.connect(self._laser_edited)
         self.enabled_checkbox.toggled.connect(self._enabled_changed)
         self.wavelength_spin.valueChanged.connect(self._wavelength_edited)
+        self.profile_combo.currentIndexChanged.connect(self._profile_edited)
+        self.focus_waist_x_spin.valueChanged.connect(self._focus_parameters_edited)
+        self.focus_waist_y_spin.valueChanged.connect(self._focus_parameters_edited)
+        self.focus_z_spin.valueChanged.connect(self._focus_parameters_edited)
+        self.focus_midpoint_checkbox.toggled.connect(self._focus_parameters_edited)
         self.launch_input_mode_combo.currentIndexChanged.connect(
             self._launch_input_mode_edited
         )
@@ -444,6 +489,70 @@ class LaunchPlaneWidget(QWidget):
         beam = self._beam_stack.beams[self._selected_index]
         self._apply_selected_beam(beam.with_wavelength_um(wavelength_um))
 
+    def _profile_edited(self, _index: int) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        beam = self._beam_stack.beams[self._selected_index]
+        profile = self.profile_combo.currentData()
+        if profile == "focused_gaussian":
+            beam = replace(
+                beam,
+                profile=profile,
+                waist_x_at_focus_um=beam.waist_x_um,
+                waist_y_at_focus_um=beam.waist_y_um,
+                focus_z_um=0.0,
+                focus_at_interaction_midpoint=False,
+            )
+        else:
+            beam = replace(
+                beam,
+                profile=profile,
+                waist_x_at_focus_um=None,
+                waist_y_at_focus_um=None,
+                focus_z_um=None,
+                focus_at_interaction_midpoint=False,
+            )
+        self._apply_selected_beam(beam)
+
+    def _focus_parameters_edited(self, _value=None) -> None:
+        if self._updating_inspector or self._selected_index is None:
+            return
+        beam = self._beam_stack.beams[self._selected_index]
+        if beam.profile != "focused_gaussian":
+            return
+        midpoint = self.focus_midpoint_checkbox.isChecked()
+        self._apply_selected_beam(
+            replace(
+                beam,
+                waist_x_at_focus_um=self.focus_waist_x_spin.value(),
+                waist_y_at_focus_um=self.focus_waist_y_spin.value(),
+                focus_z_um=None if midpoint else self.focus_z_spin.value(),
+                focus_at_interaction_midpoint=midpoint,
+            )
+        )
+
+    def set_optical_context(
+        self,
+        *,
+        n_ref: float,
+        interaction_length_um: float,
+        propagation_sign: int = 1,
+        boundary_mode: str = "periodic",
+    ) -> None:
+        """Supply material-neutral launch geometry and display-only boundary intent."""
+
+        if boundary_mode not in ("periodic", "sponge", "tukey"):
+            raise ValueError("boundary_mode must be periodic, sponge, or tukey")
+        self._boundary_mode = boundary_mode
+        self.scene.set_optical_context(
+            n_ref=n_ref,
+            interaction_length_um=interaction_length_um,
+            propagation_sign=propagation_sign,
+        )
+        if self._selected_index is not None:
+            self.scene.beam_items[self._selected_index].setSelected(True)
+        self._sync_inspector()
+
     def _launch_input_mode_edited(self, _index: int) -> None:
         if self._updating_inspector or self._selected_index is None:
             return
@@ -561,6 +670,55 @@ class LaunchPlaneWidget(QWidget):
                 for field_name, editor in self._numeric_editors.items():
                     editor.setValue(getattr(beam, field_name))
                 self.wavelength_spin.setValue(beam.wavelength_um)
+                profile_index = self.profile_combo.findData(beam.profile)
+                self.profile_combo.setCurrentIndex(profile_index)
+                focused = beam.profile == "focused_gaussian"
+                entrance_waist = beam.profile in (
+                    "legacy_gaussian",
+                    "collimated_gaussian",
+                )
+                for widget in (
+                    self.waist_x_label,
+                    self.waist_x_spin,
+                    self.waist_y_label,
+                    self.waist_y_spin,
+                ):
+                    widget.setVisible(entrance_waist)
+                self.focus_waist_x_spin.setValue(
+                    beam.waist_x_um
+                    if beam.waist_x_at_focus_um is None
+                    else beam.waist_x_at_focus_um
+                )
+                self.focus_waist_y_spin.setValue(
+                    beam.waist_y_um
+                    if beam.waist_y_at_focus_um is None
+                    else beam.waist_y_at_focus_um
+                )
+                self.focus_z_spin.setValue(
+                    0.0 if beam.focus_z_um is None else beam.focus_z_um
+                )
+                self.focus_midpoint_checkbox.setChecked(
+                    beam.focus_at_interaction_midpoint
+                )
+                for widget in (
+                    self.focus_waist_x_label,
+                    self.focus_waist_x_spin,
+                    self.focus_waist_y_label,
+                    self.focus_waist_y_spin,
+                    self.focus_z_label,
+                    self.focus_z_spin,
+                    self.focus_midpoint_label,
+                    self.focus_midpoint_checkbox,
+                    self.entrance_geometry_label,
+                    self.entrance_geometry,
+                    self.aperture_fit_label,
+                    self.aperture_fit,
+                ):
+                    widget.setVisible(focused)
+                self.focus_z_spin.setEnabled(
+                    focused and not beam.focus_at_interaction_midpoint
+                )
+                self._sync_optical_summary(beam)
                 mode_index = self.launch_input_mode_combo.findData(
                     beam.launch_input_mode
                 )
@@ -597,6 +755,47 @@ class LaunchPlaneWidget(QWidget):
             for editor in self._inspector_editors:
                 editor.blockSignals(False)
             self._updating_inspector = False
+
+    def _sync_optical_summary(self, beam: BeamDefinition) -> None:
+        context = self.scene.optical_context
+        if beam.profile == "focused_gaussian" and context is not None:
+            focus_z, wx, wy, rx, ry = focused_gaussian_entrance_geometry(
+                beam,
+                n_ref=context[0],
+                interaction_length_um=context[1],
+                propagation_sign=context[2],
+            )
+            self.entrance_geometry.setText(
+                f"dotted focus-waist reference=({beam.waist_x_at_focus_um:g}, "
+                f"{beam.waist_y_at_focus_um:g}) µm; focus z={focus_z:g} µm; "
+                f"entrance radii=({wx:.6g}, {wy:.6g}) µm; "
+                f"curvature=({rx:.6g}, {ry:.6g}) µm"
+            )
+        else:
+            wx = float(beam.waist_x_um)
+            wy = float(beam.waist_y_um)
+            self.entrance_geometry.setText(
+                "uniform entrance field"
+                if beam.profile == "uniform"
+                else f"entrance radii=({wx:g}, {wy:g}) µm"
+            )
+        if beam.profile == "uniform":
+            edge_ratio = 1.0
+        else:
+            half_x = 0.5 * self.scene.definition.x_aperture_um
+            half_y = 0.5 * self.scene.definition.y_aperture_um
+            gap_x = max(0.0, half_x - abs(float(beam.x_um)))
+            gap_y = max(0.0, half_y - abs(float(beam.y_um)))
+            edge_ratio = math.exp(-2.0 * min((gap_x / wx) ** 2, (gap_y / wy) ** 2))
+        if self._boundary_mode == "periodic" and edge_ratio >= 1.0e-6:
+            prefix = "Warning — significant field reaches periodic boundary"
+        elif self._boundary_mode == "sponge":
+            prefix = "Sponge boundary — edge absorption is intentional"
+        else:
+            prefix = "Input aperture: OK"
+        self.aperture_fit.setText(
+            f"{prefix}; estimated edge intensity={edge_ratio:.3g} of peak"
+        )
 
     def _fit_aperture(self) -> None:
         self.cancel_placement()
