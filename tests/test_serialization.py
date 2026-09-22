@@ -1,253 +1,60 @@
-"""Tests for LaunchPlane JSON serialization."""
-
 import json
-
+from dataclasses import fields
 import pytest
-
 from launchplane.model import BeamDefinition, BeamStackDefinition
-from launchplane.serialization import (
-    SCHEMA_VERSION,
-    beam_stack_from_dict,
-    beam_stack_to_dict,
-    load_beam_stack_json,
-    save_beam_stack_json,
-)
+from launchplane.serialization import (beam_stack_to_dict,beam_stack_from_dict,
+    save_beam_stack_json,load_beam_stack_json,SCHEMA_VERSION)
 
 
-def make_stack() -> BeamStackDefinition:
-    return BeamStackDefinition(
-        beams=(
-            BeamDefinition(
-                name="Signal",
-                wavelength_um=0.633,
-                power_mW=0.6,
-                x_um=-4.0,
-                y_um=-12.0,
-                waist_x_um=3.0,
-                waist_y_um=5.0,
-                tilt_y_rad_per_um=0.018,
-                phase_rad=0.25,
-                coherence_group="laser_A",
-            ),
-            BeamDefinition(
-                name="Probe",
-                wavelength_um=0.532,
-                power_mW=0.1,
-                x_um=8.0,
-                y_um=16.0,
-                waist_x_um=2.5,
-                waist_y_um=2.5,
-                tilt_x_rad_per_um=-0.014,
-                coherence_group="laser_B",
-                enabled=False,
-            ),
-        )
-    )
+def example():
+    return BeamStackDefinition(beams=(BeamDefinition(name='asymmetric',wavelength_um=.532,
+        power_mW=2.3,n_ext=1.4,theta_ext_rad=.8,phi_rad=2.1,w1_um=3,w2_um=8,
+        psi_rad=.7,x_um=5,y_um=-6,phase_rad=1.2,enabled=False,coherence_group='laser B'),))
 
 
-def test_old_positional_constructor_remains_stable():
-    beam = BeamDefinition(
-        "old",
-        0.532,
-        2.0,
-        1.0,
-        -2.0,
-        4.0,
-        5.0,
-        0.1,
-        -0.2,
-        None,
-        "transverse_wavevector",
-        0.3,
-        "laser",
-        False,
-    )
-
-    assert beam.enabled is False
-    assert beam.profile == "legacy_gaussian"
-    assert beam.waist_x_at_focus_um is None
+def test_roundtrip_all_physical_intent_and_derived_values(tmp_path):
+    stack=example(); data=beam_stack_to_dict(stack)
+    assert SCHEMA_VERSION==4
+    assert set(data['beams'][0])=={f.name for f in fields(BeamDefinition)}
+    assert not any('tilt' in k or 'wavevector' in k for k in data['beams'][0])
+    restored=beam_stack_from_dict(json.loads(json.dumps(data)))
+    assert restored==stack
+    assert restored.beams[0].external_wavevector_rad_per_um==stack.beams[0].external_wavevector_rad_per_um
+    p=save_beam_stack_json(stack,tmp_path/'nested'/'beams.json')
+    assert load_beam_stack_json(p)==stack
+    assert beam_stack_to_dict(restored)==data
 
 
-def test_beam_stack_dict_round_trip():
-    stack = make_stack()
-
-    payload = beam_stack_to_dict(stack)
-    restored = beam_stack_from_dict(payload)
-
-    assert payload["schema_version"] == SCHEMA_VERSION
-    assert restored == stack
-    assert payload["beams"][0]["launch_input_mode"] == "transverse_wavevector"
-    assert payload["beams"][0]["launch_medium_index"] is None
+@pytest.mark.parametrize('version',[None,1,2,3,5,'4',4.0,True])
+def test_obsolete_or_unknown_schema_rejected_without_guessing(version):
+    with pytest.raises(ValueError,match='Recreate/re-export'):
+        beam_stack_from_dict({'schema_version':version,'beams':[]})
 
 
-def test_focused_profile_round_trips_in_current_schema():
-    stack = BeamStackDefinition(
-        beams=(
-            BeamDefinition(
-                profile="focused_gaussian",
-                waist_x_at_focus_um=4.0,
-                waist_y_at_focus_um=8.0,
-                focus_at_interaction_midpoint=True,
-            ),
-        )
-    )
-
-    assert beam_stack_from_dict(beam_stack_to_dict(stack)) == stack
+@pytest.mark.parametrize('name',[f.name for f in fields(BeamDefinition)])
+def test_missing_intent_not_silently_defaulted(name):
+    data=beam_stack_to_dict(example());del data['beams'][0][name]
+    with pytest.raises(ValueError,match='schema-4 fields'): beam_stack_from_dict(data)
 
 
-def test_schema_one_migration_preserves_phase_slopes_and_unknown_medium():
-    payload = beam_stack_to_dict(make_stack())
-    payload["schema_version"] = 1
-    for beam in payload["beams"]:
-        del beam["launch_input_mode"]
-        del beam["launch_medium_index"]
-        del beam["profile"]
-        del beam["waist_x_at_focus_um"]
-        del beam["waist_y_at_focus_um"]
-        del beam["focus_z_um"]
-        del beam["focus_at_interaction_midpoint"]
-    expected_q = tuple(
-        (beam["tilt_x_rad_per_um"], beam["tilt_y_rad_per_um"])
-        for beam in payload["beams"]
-    )
-
-    restored = beam_stack_from_dict(payload)
-
-    assert tuple(
-        (beam.tilt_x_rad_per_um, beam.tilt_y_rad_per_um)
-        for beam in restored.beams
-    ) == expected_q
-    assert all(
-        beam.launch_input_mode == "transverse_wavevector"
-        for beam in restored.beams
-    )
-    assert all(beam.launch_medium_index is None for beam in restored.beams)
-    assert all(beam.profile == "legacy_gaussian" for beam in restored.beams)
+def test_unknown_derived_or_old_fields_rejected():
+    for key in ('tilt_x_rad_per_um','kx','launch_input_mode','focus_z_um'):
+        data=beam_stack_to_dict(example());data['beams'][0][key]=0
+        with pytest.raises(ValueError,match='unexpected'): beam_stack_from_dict(data)
 
 
-def test_schema_two_migration_preserves_legacy_entrance_gaussian_semantics():
-    payload = beam_stack_to_dict(make_stack())
-    payload["schema_version"] = 2
-    for beam in payload["beams"]:
-        del beam["profile"]
-        del beam["waist_x_at_focus_um"]
-        del beam["waist_y_at_focus_um"]
-        del beam["focus_z_um"]
-        del beam["focus_at_interaction_midpoint"]
-
-    restored = beam_stack_from_dict(payload)
-
-    assert all(beam.profile == "legacy_gaussian" for beam in restored.beams)
-    assert all(beam.waist_x_at_focus_um is None for beam in restored.beams)
+@pytest.mark.parametrize('payload',[[],{'schema_version':4,'beams':{}}, {'schema_version':4,'beams':[1]},
+                                   {'schema_version':4,'beams':[],'unknown':1}])
+def test_malformed_payload(payload):
+    with pytest.raises((TypeError,ValueError)):beam_stack_from_dict(payload)
 
 
-@pytest.mark.parametrize("missing", ["launch_input_mode", "launch_medium_index"])
-def test_schema_two_requires_launch_provenance_fields(missing):
-    payload = beam_stack_to_dict(make_stack())
-    payload["schema_version"] = 2
-    for beam in payload["beams"]:
-        del beam["profile"]
-        del beam["waist_x_at_focus_um"]
-        del beam["waist_y_at_focus_um"]
-        del beam["focus_z_um"]
-        del beam["focus_at_interaction_midpoint"]
-    del payload["beams"][0][missing]
-
-    with pytest.raises(ValueError, match="missing schema-2 fields"):
-        beam_stack_from_dict(payload)
+def test_invalid_json_and_physical_values(tmp_path):
+    p=tmp_path/'bad.json';p.write_text('{')
+    with pytest.raises(ValueError,match='Invalid JSON'):load_beam_stack_json(p)
+    data=beam_stack_to_dict(example());data['beams'][0]['n_ext']=0
+    with pytest.raises(ValueError,match='n_ext'):beam_stack_from_dict(data)
 
 
-def test_beam_stack_json_file_round_trip(tmp_path):
-    stack = make_stack()
-    path = tmp_path / "nested" / "beam_stack.json"
-
-    returned_path = save_beam_stack_json(stack, path)
-    restored = load_beam_stack_json(path)
-
-    assert returned_path == path
-    assert restored == stack
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == SCHEMA_VERSION
-    assert len(payload["beams"]) == 2
-
-
-def test_rejects_unsupported_schema_version():
-    payload = beam_stack_to_dict(make_stack())
-    payload["schema_version"] = SCHEMA_VERSION + 1
-
-    with pytest.raises(ValueError, match="Unsupported schema_version"):
-        beam_stack_from_dict(payload)
-
-
-def test_rejects_invalid_beam_entry():
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "beams": [
-            {
-                "name": "Invalid",
-                "wavelength_um": 0.0,
-                "power_mW": 1.0,
-                "x_um": 0.0,
-                "y_um": 0.0,
-                "waist_x_um": 3.0,
-                "waist_y_um": 3.0,
-                "tilt_x_rad_per_um": 0.0,
-                "tilt_y_rad_per_um": 0.0,
-                "launch_medium_index": 1.0,
-                "launch_input_mode": "angle",
-                "phase_rad": 0.0,
-                "coherence_group": "laser_A",
-                "enabled": True,
-                "profile": "legacy_gaussian",
-                "waist_x_at_focus_um": None,
-                "waist_y_at_focus_um": None,
-                "focus_z_um": None,
-                "focus_at_interaction_midpoint": False,
-            }
-        ],
-    }
-
-    with pytest.raises(ValueError, match="wavelength_um must be positive"):
-        beam_stack_from_dict(payload)
-
-
-def test_rejects_duplicate_beam_names():
-    beam = BeamDefinition(name="Same")
-    stack = BeamStackDefinition(beams=(beam, beam))
-
-    with pytest.raises(ValueError, match="Duplicate beam name"):
-        beam_stack_to_dict(stack)
-
-
-def test_serialization_stores_only_beam_coherence_group_strings():
-    payload = beam_stack_to_dict(make_stack())
-
-    assert "coherence_groups" not in payload
-    assert [beam["coherence_group"] for beam in payload["beams"]] == [
-        "laser_A",
-        "laser_B",
-    ]
-    assert beam_stack_from_dict(payload) == make_stack()
-
-
-def test_rejects_empty_coherence_group():
-    stack = BeamStackDefinition(
-        beams=(BeamDefinition(name="No laser", coherence_group="   "),)
-    )
-
-    with pytest.raises(ValueError, match="coherence_group must be non-empty"):
-        beam_stack_to_dict(stack)
-
-
-def test_coherence_groups_are_derived_in_first_use_order():
-    stack = BeamStackDefinition(
-        beams=(
-            BeamDefinition(name="A", coherence_group="laser_B", enabled=False),
-            BeamDefinition(name="B", coherence_group="laser_A"),
-            BeamDefinition(name="C", coherence_group="laser_B"),
-        )
-    )
-
-    stack.validate()
-    assert stack.coherence_groups == ("laser_B", "laser_A")
+def test_empty_stack_roundtrip():
+    assert beam_stack_from_dict(beam_stack_to_dict(BeamStackDefinition()))==BeamStackDefinition()

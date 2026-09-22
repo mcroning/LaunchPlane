@@ -1,224 +1,84 @@
-"""External-angle and transverse-wavevector model tests."""
-
-from dataclasses import replace
+"""Physical external intent, independent of Qt and the material resolver."""
 import math
-
+from dataclasses import replace
 import pytest
-
-from launchplane.model import (
-    BeamDefinition,
-    launch_angles_to_transverse_wavevector,
-    transverse_wavevector_to_launch_angles,
-)
+from launchplane.model import BeamDefinition, BeamStackDefinition, LaunchPlaneDefinition
 
 
-def test_direct_constructor_preserves_legacy_wavevector_semantics():
-    beam = BeamDefinition(
-        wavelength_um=0.633,
-        tilt_x_rad_per_um=0.1,
-        tilt_y_rad_per_um=-0.2,
-    )
-
-    assert beam.launch_input_mode == "transverse_wavevector"
-    assert beam.launch_medium_index is None
-    beam.validate()
-
-    changed = beam.with_wavelength_um(0.532)
-    assert changed.tilt_x_rad_per_um == beam.tilt_x_rad_per_um
-    assert changed.tilt_y_rad_per_um == beam.tilt_y_rad_per_um
+def test_normal_direction_and_default_medium():
+    beam = BeamDefinition(phi_rad=1.7)
+    assert beam.external_direction == (0, 0, 1)
+    assert beam.transverse_wavevector_rad_per_um == (0, 0)
+    assert beam.n_ext == 1
 
 
-def test_direct_constructor_accepts_large_legacy_wavevector():
-    beam = BeamDefinition(tilt_x_rad_per_um=20.0)
-
-    beam.validate()
-    assert beam.launch_input_mode == "transverse_wavevector"
-    assert beam.launch_medium_index is None
-
-
-def test_zero_external_angle_has_zero_transverse_wavevector():
-    beam = BeamDefinition.from_launch_angles(angle_x_rad=0.0, angle_y_rad=0.0)
-
-    assert beam.tilt_x_rad_per_um == 0.0
-    assert beam.tilt_y_rad_per_um == 0.0
-    assert beam.launch_angles_rad == (0.0, 0.0)
+@pytest.mark.parametrize('phi,xy', [(0,(1,0)), (math.pi/2,(0,1)),
+                                    (math.pi,(-1,0)), (3*math.pi/2,(0,-1))])
+def test_quadrants(phi, xy):
+    beam = BeamDefinition(theta_ext_rad=math.pi/6, phi_rad=phi, n_ext=1.5, wavelength_um=0.5)
+    assert beam.external_direction == pytest.approx((xy[0]/2,xy[1]/2,math.sqrt(3)/2))
+    assert beam.transverse_wavevector_rad_per_um == pytest.approx((3*math.pi*xy[0],3*math.pi*xy[1]))
 
 
-def test_required_air_launch_case():
-    beam = BeamDefinition.from_launch_angles(
-        wavelength_um=0.633,
-        angle_x_rad=0.1,
-        angle_y_rad=0.0,
-        launch_medium_index=1.0,
-    )
-
-    assert beam.tilt_x_rad_per_um == pytest.approx(0.9909508004, abs=5e-11)
-    assert beam.tilt_y_rad_per_um == 0.0
-
-
-def test_angle_conversion_is_odd():
-    positive = BeamDefinition.from_launch_angles(
-        angle_x_rad=0.17,
-        angle_y_rad=-0.08,
-    )
-    negative = BeamDefinition.from_launch_angles(
-        angle_x_rad=-0.17,
-        angle_y_rad=0.08,
-    )
-
-    assert negative.tilt_x_rad_per_um == pytest.approx(
-        -positive.tilt_x_rad_per_um
-    )
-    assert negative.tilt_y_rad_per_um == pytest.approx(
-        -positive.tilt_y_rad_per_um
-    )
+def test_arbitrary_direction_and_independent_roll():
+    beam = BeamDefinition(theta_ext_rad=0.7, phi_rad=0.8, w1_um=3, w2_um=7,
+                          psi_rad=0.4, x_um=5, y_um=-6, phase_rad=1.2)
+    expected=(math.sin(.7)*math.cos(.8), math.sin(.7)*math.sin(.8), math.cos(.7))
+    assert beam.external_direction == expected
+    assert replace(beam, psi_rad=1.9).external_wavevector_rad_per_um == beam.external_wavevector_rad_per_um
+    assert replace(beam, wavelength_um=2*beam.wavelength_um).external_wavevector_rad_per_um == pytest.approx(tuple(k/2 for k in beam.external_wavevector_rad_per_um))
+    assert replace(beam, n_ext=2).external_wavevector_rad_per_um == pytest.approx(tuple(k*2 for k in beam.external_wavevector_rad_per_um))
+    assert (beam.x_um,beam.y_um,beam.phase_rad,beam.w1_um,beam.w2_um)==(5,-6,1.2,3,7)
 
 
-def test_two_axis_angles_form_one_normalized_direction():
-    angle_x = 0.3
-    angle_y = -0.2
-    wavelength = 0.7
-    index = 1.4
-    qx, qy = launch_angles_to_transverse_wavevector(
-        angle_x_rad=angle_x,
-        angle_y_rad=angle_y,
-        wavelength_um=wavelength,
-        launch_medium_index=index,
-    )
-    tx = math.tan(angle_x)
-    ty = math.tan(angle_y)
-    norm = math.sqrt(1.0 + tx * tx + ty * ty)
-    k_launch = 2.0 * math.pi * index / wavelength
-
-    assert qx == pytest.approx(k_launch * tx / norm)
-    assert qy == pytest.approx(k_launch * ty / norm)
-    assert math.hypot(qx, qy) < k_launch
-    assert qx != pytest.approx(k_launch * math.sin(angle_x))
+def test_angle_wrapping_and_immutable_equality():
+    a=BeamDefinition(phi_rad=-math.pi/2,psi_rad=math.tau)
+    b=BeamDefinition(phi_rad=3*math.pi/2,psi_rad=0)
+    assert a==b and hash(a)==hash(b)
+    with pytest.raises(AttributeError):
+        a.n_ext=2
 
 
-@pytest.mark.parametrize(
-    ("angle_x", "angle_y"),
-    [(0.0, 0.0), (0.31, 0.0), (0.0, -0.27), (0.22, -0.19)],
-)
-def test_angle_wavevector_round_trip(angle_x, angle_y):
-    qx, qy = launch_angles_to_transverse_wavevector(
-        angle_x_rad=angle_x,
-        angle_y_rad=angle_y,
-        wavelength_um=0.532,
-        launch_medium_index=1.33,
-    )
-
-    recovered = transverse_wavevector_to_launch_angles(
-        transverse_wavevector_x_rad_per_um=qx,
-        transverse_wavevector_y_rad_per_um=qy,
-        wavelength_um=0.532,
-        launch_medium_index=1.33,
-    )
-
-    assert recovered == pytest.approx((angle_x, angle_y), abs=2e-16)
+@pytest.mark.parametrize('field,value', [
+    ('theta_ext_rad',-1e-9), ('theta_ext_rad',math.pi/2), ('theta_ext_rad',math.pi),
+    ('n_ext',0), ('n_ext',-1), ('n_ext',math.inf), ('n_ext',math.nan),
+    ('w1_um',0), ('w2_um',-1), ('wavelength_um',0), ('power_mW',-1),
+    ('phi_rad',math.nan), ('psi_rad',math.inf), ('x_um',math.nan),
+    ('phase_rad',math.inf), ('enabled',1), ('power_mW',True),
+    ('name',''), ('coherence_group',' '), ('profile','focused_gaussian'),
+    ('profile','uniform'), ('profile','legacy_gaussian'),
+])
+def test_invalid_intent_rejected(field,value):
+    with pytest.raises(ValueError): BeamDefinition(**{field:value})
 
 
-def test_wavevector_scales_with_inverse_wavelength_and_launch_index():
-    reference = BeamDefinition.from_launch_angles(
-        wavelength_um=0.8,
-        launch_medium_index=1.0,
-        angle_x_rad=0.12,
-    )
-    shorter = BeamDefinition.from_launch_angles(
-        wavelength_um=0.4,
-        launch_medium_index=1.0,
-        angle_x_rad=0.12,
-    )
-    denser = BeamDefinition.from_launch_angles(
-        wavelength_um=0.8,
-        launch_medium_index=1.5,
-        angle_x_rad=0.12,
-    )
-
-    assert shorter.tilt_x_rad_per_um == pytest.approx(
-        2.0 * reference.tilt_x_rad_per_um
-    )
-    assert denser.tilt_x_rad_per_um == pytest.approx(
-        1.5 * reference.tilt_x_rad_per_um
-    )
+def test_old_constructor_is_not_an_execution_bridge():
+    with pytest.raises(TypeError): BeamDefinition(waist_x_um=3)
+    with pytest.raises(TypeError): BeamDefinition(tilt_x_rad_per_um=0.2)
+    with pytest.raises(TypeError): BeamDefinition(launch_input_mode='angle')
+    assert not hasattr(BeamDefinition(), 'waist_x_um')
+    assert not hasattr(BeamDefinition(), 'tilt_x_rad_per_um')
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"angle_x_rad": math.nan},
-        {"angle_y_rad": math.inf},
-        {"angle_x_rad": math.pi / 2.0},
-        {"angle_y_rad": -math.pi / 2.0},
-        {"wavelength_um": 0.0},
-        {"launch_medium_index": 0.0},
-    ],
-)
-def test_invalid_angle_inputs_are_rejected(kwargs):
-    with pytest.raises(ValueError):
-        BeamDefinition.from_launch_angles(**kwargs)
+def test_stack_power_groups_and_names():
+    stack=BeamStackDefinition(beams=[BeamDefinition(name='a',power_mW=0),
+        BeamDefinition(name='b',power_mW=2),BeamDefinition(name='c',power_mW=9,enabled=False,coherence_group='other')])
+    assert stack.total_power_mW==2
+    assert stack.coherence_groups==('laser_A','other')
+    assert isinstance(stack.beams,tuple)
+    with pytest.raises(ValueError,match='Duplicate'): BeamStackDefinition(beams=(BeamDefinition(),BeamDefinition()))
 
 
-def test_nonpropagating_inverse_is_rejected_but_wavevector_mode_can_store_it():
-    beam = BeamDefinition(
-        tilt_x_rad_per_um=20.0,
-        launch_medium_index=1.0,
-        launch_input_mode="transverse_wavevector",
-    )
-    beam.validate()
-
-    with pytest.raises(ValueError, match="not a propagating direction"):
-        _ = beam.launch_angles_rad
+@pytest.mark.parametrize('value',[0,-1,math.nan,math.inf])
+def test_aperture_validation(value):
+    with pytest.raises(ValueError): LaunchPlaneDefinition(x_aperture_um=value)
 
 
-def test_angle_mode_wavelength_and_index_edits_preserve_angles():
-    beam = BeamDefinition.from_launch_angles(
-        wavelength_um=0.633,
-        launch_medium_index=1.0,
-        angle_x_rad=0.1,
-        angle_y_rad=-0.05,
-    )
-    q_before = (beam.tilt_x_rad_per_um, beam.tilt_y_rad_per_um)
-
-    wavelength_changed = beam.with_wavelength_um(0.532)
-    index_changed = beam.with_launch_medium_index(1.5)
-
-    assert wavelength_changed.launch_angles_rad == pytest.approx(
-        beam.launch_angles_rad
-    )
-    assert index_changed.launch_angles_rad == pytest.approx(beam.launch_angles_rad)
-    assert wavelength_changed.tilt_x_rad_per_um != q_before[0]
-    assert index_changed.tilt_y_rad_per_um != q_before[1]
-
-
-def test_wavevector_mode_wavelength_and_index_edits_preserve_wavevector():
-    beam = BeamDefinition(
-        tilt_x_rad_per_um=0.7,
-        tilt_y_rad_per_um=-0.4,
-        launch_medium_index=1.0,
-        launch_input_mode="transverse_wavevector",
-    )
-    q_before = (beam.tilt_x_rad_per_um, beam.tilt_y_rad_per_um)
-
-    wavelength_changed = beam.with_wavelength_um(0.532)
-    index_changed = beam.with_launch_medium_index(1.5)
-
-    assert (
-        wavelength_changed.tilt_x_rad_per_um,
-        wavelength_changed.tilt_y_rad_per_um,
-    ) == q_before
-    assert (
-        index_changed.tilt_x_rad_per_um,
-        index_changed.tilt_y_rad_per_um,
-    ) == q_before
-
-
-def test_angle_mode_requires_known_launch_medium():
-    beam = replace(
-        BeamDefinition(),
-        launch_medium_index=None,
-        launch_input_mode="angle",
-    )
-
-    with pytest.raises(ValueError, match="known launch_medium_index"):
-        beam.validate()
+def test_model_and_serialization_are_headless():
+    import subprocess
+    import sys
+    subprocess.run([sys.executable, '-c',
+        'import sys; from launchplane.model import BeamDefinition; '
+        'from launchplane.serialization import beam_stack_to_dict; '
+        'BeamDefinition(); assert not any(m.startswith("PySide6") for m in sys.modules)'],
+        check=True)

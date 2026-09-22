@@ -1,150 +1,144 @@
 # LaunchPlane
 
-LaunchPlane is a reusable GUI and data-model component for defining and
-visualizing optical beam launch conditions. It provides an interactive
-launch-plane editor together with beam definitions and JSON serialization.
+LaunchPlane is an experimental, pre-release optical beam-intent model and
+PySide6 editor. The physical-intent milestone is an intentional breaking API
+and serialization change. It edits external incident beams; it does **not**
+yet construct physical material-interface launch fields.
 
-## Launch-angle semantics
+## Physical intent
 
-The normal editor specifies external launch angles in radians. These angles
-are measured in the LaunchPlane launch medium immediately before the first
-downstream optical or material interface. Air, with launch-medium refractive
-index `1.0`, is the default for newly created angle-mode beams. They are not
-angles inside a downstream medium, and LaunchPlane does not calculate
-downstream refraction.
+`launchplane.model.BeamDefinition` is an immutable, keyword-only, headless
+model. Construction validates finite inputs. All lengths are micrometres,
+angles are radians, and power is mW; the editor displays direction and roll
+in degrees.
 
-Each beam's `wavelength_um` is its vacuum wavelength. LaunchPlane converts the
-external projected-plane angles to the conserved transverse wavevector
-components `qx` and `qy` in rad/µm. The stored compatibility fields
-`tilt_x_rad_per_um` and `tilt_y_rad_per_um` contain those components; they are
-phase slopes, not angles. They remain the canonical interchange quantities,
-and LCProp receives them unchanged.
+| Field | Meaning |
+| --- | --- |
+| `wavelength_um` | Vacuum wavelength, positive |
+| `power_mW` | Nonnegative incident physical power through the external beam-normal plane, before the interface and laboratory screens |
+| `n_ext` | Positive index immediately outside the material entrance, default 1 |
+| `theta_ext_rad` | External polar angle from +z; `0 <= theta < pi/2` |
+| `phi_rad` | Azimuth from +x toward +y, normalized modulo `2*pi` |
+| `w1_um`, `w2_um` | Positive external beam-normal 1/e field (1/e² intensity) radii |
+| `psi_rad` | Independent profile roll, modulo `2*pi`; referenced to laboratory +x at normal incidence |
+| `x_um`, `y_um` | Axis intersection with the entrance plane z=0; no implicit targeting |
+| `phase_rad` | Phase at that axis/entrance intersection |
+| `name`, `coherence_group`, `enabled` | Beam label, coherence membership and enabled state |
+| `profile` | Only `collimated_gaussian` is supported in this physical-intent milestone |
 
-The advanced transverse-wavevector editor allows direct phase-slope input.
-Legacy schema-version-1 records are loaded in that advanced mode with an
-unknown launch medium, preserving their stored phase slopes exactly without
-assuming that they originated in air.
+Equal radii describe a circular incident beam. Roll does not change propagation
+direction; phi is not roll. At theta=0, phi is retained as editor intent but has
+no physical directional significance. Zero power is valid intent; it does not
+establish a dark-relaxation solver contract. Names/order are not stable carrier
+identifiers.
 
-## Beam profiles and focus semantics
+Read-only `external_direction`, `external_wavevector_rad_per_um` and
+`transverse_wavevector_rad_per_um` derive direction and k from external intent:
 
-Schema version 3 distinguishes four launch profiles:
-
-- `legacy_gaussian`: the historical Gaussian whose `waist_x_um` and
-  `waist_y_um` are entrance-plane 1/e field radii;
-- `collimated_gaussian`: a finite entrance-plane Gaussian with a flat
-  wavefront;
-- `uniform`: a constant entrance-plane amplitude;
-- `focused_gaussian`: a Gaussian specified by its x/y 1/e field radii at the
-  waist and the waist position.
-
-LaunchPlane records beam intent and visualizes the launch plane, but it does not
-know the consuming application's propagation grid. For a tilted uniform or
-plane-wave field on a periodic grid, the consuming application must enforce
-exact compatibility with its discrete periodic Fourier modes.
-
-For a focused Gaussian, `focus_z_um=0` is the application's interaction
-entrance plane. Positive values place the waist downstream along the
-application's selected propagation coordinate; negative values place it
-upstream. The application supplies a material-neutral optical context
-containing the propagation index, interaction length, and propagation sign.
-The sign maps the selected propagation coordinate to the signed z increment
-used by the propagator; it does not reinterpret a positive focus position as
-upstream. The midpoint convenience places the waist at half the supplied
-interaction length and makes an explicit `focus_z_um` unnecessary.
-
-When that context is available, the solid canvas ellipse is the derived beam
-footprint at the entrance. A dotted ellipse is only a centered size reference
-for the requested waist at its focus; it does not represent another field at
-the entrance plane. The inspector reports both radii, the focus position,
-entrance curvature, and an estimated peak-normalized intensity at the nearest
-aperture edge. A periodic boundary makes significant edge intensity a
-wraparound warning, while a sponge policy presents it as intentional edge
-absorption information. Boundary treatment itself remains owned by the host
-propagator, not LaunchPlane.
-
-Schema versions 1 and 2 remain readable and migrate to `legacy_gaussian`, so
-their entrance-plane semantics do not change.
-
-## Project status
-
-LaunchPlane is experimental, developmental, and pre-release software. Its API
-and package structure may change, and the current interface is not yet a stable
-public API. This repository is published to preserve provenance and make the
-working implementation reproducible and inspectable; it is not currently a
-PyPI release.
-
-## Development installation
-
-From a local checkout, install LaunchPlane in editable mode:
-
-```bash
-python -m pip install -e .
+```text
+s = (sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta))
+k_ext = 2*pi*n_ext/wavelength_um
+(kx, ky, kz_ext) = k_ext*s
 ```
 
-The current runtime dependency is PySide6, which is installed through the
-package metadata.
+There is no editable kx/ky mode. Changing wavelength or n_ext leaves theta/phi
+unchanged. Use `dataclasses.replace` to edit immutable definitions.
 
-LaunchPlane requires Python 3.11 or newer. To install the test runner and run
-the standalone test suite:
+## Editor and arrows
 
-```bash
-python -m pip install pytest
-python -m pytest
-```
+The laboratory face uses x horizontal/right, y vertical/up; the Qt scene uses
+`(x, -y)`. Click to place, drag a center to move, and select to edit the inspector.
+The direction handle edits theta/phi without changing center or roll.
 
-## Current import
+Arrows have **display-pixel** length `80*sin(theta_ext)` by default, independent
+of zoom. They indicate external direction, not a trajectory through a material.
+Every label includes numerical theta. Normal incidence has a center symbol
+without an arbitrary-direction arrow. Disabled beams are gray and labelled;
+names, ordered numbers and selected-center color distinguish beams.
 
-The currently supported import for the primary GUI component is:
+The canvas deliberately shows no footprint ellipse or aperture-capture claim.
+External beam-normal radii are not laboratory footprint radii. A later host
+resolver must supply resolved geometry; LaunchPlane does not own material
+index, Snell refraction, cosine/flux normalization or power qualification.
+The editor displays a persistent **physical launch resolver not yet implemented**
+status. Focused launch and beam-normal screens remain deferred. Existing
+laboratory masks are outside this package and are not rotated by roll.
+
+## Persistence and compatibility
+
+[Serialization helpers](src/launchplane/serialization.py) write schema **4**,
+containing all physical-intent fields and no authoritative derived wavevectors.
+Round trips preserve intent, units and derived k. Missing or unexpected fields
+are rejected. Schemas 1–3 are rejected with a recreate/re-export message; their
+laboratory-waist and wavevector definitions are not silently reinterpreted.
+There is no old/new semantics selector or automatic migration framework.
+
+Frozen dataclass equality/hash represent the stored intent (including the
+otherwise directionless phi at theta=0), not an assertion that two physical
+fields are equivalent. Deterministic JSON fingerprints can be obtained by
+hashing `json.dumps(beam_stack_to_dict(stack), sort_keys=True,
+separators=(",", ":"))`. Persist the schema with that fingerprint.
+
+## Standalone use
 
 ```python
-from launchplane.launchpane import LaunchPlaneWidget
+from math import pi
+from launchplane.model import BeamDefinition, BeamStackDefinition
+from launchplane.serialization import beam_stack_to_dict, beam_stack_from_dict
+
+stack = BeamStackDefinition(beams=(
+    BeamDefinition(name="Probe", theta_ext_rad=pi/6, phi_rad=pi/2,
+                   w1_um=4, w2_um=7, psi_rad=pi/4, n_ext=1.0),
+))
+assert beam_stack_from_dict(beam_stack_to_dict(stack)) == stack
 ```
 
-No package-level re-export is currently provided.
-
-## Standalone example
-
-The widget can be created and displayed without LCProp:
+The model and serialization do not import Qt. To open the standalone editor:
 
 ```python
 from PySide6.QtWidgets import QApplication
-
 from launchplane.launchpane import LaunchPlaneWidget
-from launchplane.model import BeamDefinition, BeamStackDefinition
 
 app = QApplication([])
-beams = BeamStackDefinition(
-    beams=(
-        BeamDefinition(name="Signal", x_um=-5.0, y_um=2.0),
-        BeamDefinition(name="Pump", x_um=5.0, y_um=-2.0),
-    )
-)
-widget = LaunchPlaneWidget(beam_stack=beams)
+widget = LaunchPlaneWidget(beam_stack=stack)
 widget.show()
 app.exec()
 ```
 
-## Naming
+The demo is also available with `python -m launchplane.launchpane`.
 
-- Product and repository name: **LaunchPlane**
-- Python distribution and import namespace: `launchplane`
-- Primary GUI module: `launchplane.launchpane`
-- Main widget: `LaunchPlaneWidget`
+## LCProp integration boundary
 
-These names describe the present developmental implementation and are not an
-API-stability commitment.
+LCProp owns the canonical
+[physical launch geometry and power contract](https://github.com/mcroning/LCProp/blob/c317f49d34a9e16247ae6c567a5dcc42c3f27f30/docs/architecture/beamplane_physical_launch_contract.md).
+That reference identifies a local development commit; the public remote may
+not yet contain it. The contract spans both packages but is not duplicated here.
 
-## Relationship to LCProp
+This standalone candidate is **not installed into or wired to LCProp**.
+LCProp remains on its existing LaunchPlane baseline until separately authorized
+coordinated integration. The removed laboratory-waist/wavevector API must not
+be recreated as an adapter to disguise physical intent as an old launch.
+Do not upgrade the dependency in an existing LCProp environment yet.
+Milestone 2 can consume the complete immutable intent above to implement the
+shared resolver. It must supply material context and qualification and migrate
+power consumers before enabling physical execution. No LC/PR sampled arrays,
+propagators, material models, screens or continuation change in this milestone.
 
-LCProp currently uses this working LaunchPlane implementation during
-development and fresh-clone validation. Publishing LaunchPlane provides an
-inspectable, reproducible source for that development configuration. It does
-not determine LCProp's future launch-plane architecture or make LaunchPlane a
-permanent LCProp runtime dependency.
+## Development
 
-LCProp may later incorporate its own material-neutral launch pane while
-maintaining compatibility with the independent LaunchPlane product.
+Python 3.11+ and PySide6 are required. In a dedicated development environment:
 
-## License
+```bash
+python -m pip install -e .
+python -m pip install pytest
+QT_QPA_PLATFORM=offscreen python -m pytest
+```
 
-LaunchPlane is licensed under the BSD 3-Clause License. See [LICENSE](LICENSE).
+Package/import name remains `launchplane`; the GUI class remains
+`launchplane.launchpane.LaunchPlaneWidget`. "BeamPlane" describes the physical
+editor contract, not a package rename. No package-level re-exports are provided.
+
+See the [milestone development record](docs/development/physical_intent_milestone_1.md)
+for the candidate boundary, validation and deferred native checks.
+
+LaunchPlane uses the BSD 3-Clause License. See [LICENSE](LICENSE).
