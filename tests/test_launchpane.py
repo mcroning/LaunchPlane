@@ -380,7 +380,7 @@ def test_external_inspector_intent_roundtrip_without_execution_bridge():
         widget.set_beam_stack(beam_stack_from_dict(data),0)
         assert beam_stack_to_dict(widget.beam_stack)==data
         assert 'read-only' in widget.derived_k.text()
-        assert 'resolver not yet implemented' in widget.execution_status.text()
+        assert 'requires a compatible host resolver' in widget.execution_status.text()
         assert not hasattr(widget,'tilt_x_spin')
         assert not hasattr(widget,'launch_input_mode_combo')
         assert not hasattr(widget,'profile_combo')

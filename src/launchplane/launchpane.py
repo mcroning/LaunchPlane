@@ -6,8 +6,8 @@ import math
 import sys
 from dataclasses import replace
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QPointF, QTimer, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QPainterPath, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -72,6 +72,7 @@ class LaunchPlaneWidget(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._resolved_items = []
         self._selected_index: int | None = None
         self._updating_inspector = False
         self.scene = LaunchPlaneScene(launch_plane or LaunchPlaneDefinition(), self)
@@ -130,6 +131,8 @@ class LaunchPlaneWidget(QWidget):
         layout.addWidget(self.execution_status)
 
         self.object_list.currentRowChanged.connect(self._select_scene_beam)
+        self.beamStackChanged.connect(self.clear_resolved_preview)
+        self.scene.sceneAboutToReset.connect(self.clear_resolved_preview)
         self.scene.beamSelected.connect(self._select_list_beam)
         self.scene.beamMoved.connect(self._beam_moved)
         self.scene.beamChanged.connect(self._beam_changed)
@@ -252,6 +255,7 @@ class LaunchPlaneWidget(QWidget):
     ) -> None:
         beam_stack.validate()
         self._beam_stack = beam_stack
+        self.clear_resolved_preview()
         self.scene.set_stack(beam_stack)
 
         self.object_list.blockSignals(True)
@@ -270,6 +274,44 @@ class LaunchPlaneWidget(QWidget):
         self.scene.set_selected_index(selected_index)
         self._update_button_states()
         self._sync_inspector()
+
+    def clear_resolved_preview(self, _stack=None) -> None:
+        """Invalidate host geometry whenever the physical intent changes."""
+        for item in self._resolved_items:
+            if item.scene() is self.scene:
+                self.scene.removeItem(item)
+        self._resolved_items.clear()
+        self.execution_status.setText(
+            "External physical intent. Material-aware preview requires a compatible host resolver."
+        )
+
+    def set_resolved_preview(self, contours, *, description: str) -> None:
+        """Display host-supplied laboratory (x,y) contours in physical micrometres.
+
+        This seam does not compute refraction or infer geometry from intent.
+        Contours use x-right/y-up; the Qt sign conversion is presentation only.
+        No derived value is persisted into the physical beam definition.
+        """
+        prepared = []
+        for contour in contours:
+            points = tuple((float(x), float(y)) for x, y in contour)
+            if len(points) < 3 or not all(math.isfinite(v) for p in points for v in p):
+                raise ValueError("resolved contours require at least three finite points")
+            prepared.append(points)
+        self.clear_resolved_preview()
+        pen = QPen(QColor("#247b91"))
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+        for points in prepared:
+            path = QPainterPath(QPointF(points[0][0], -points[0][1]))
+            for x, y in points[1:]:
+                path.lineTo(x, -y)
+            path.closeSubpath()
+            item = self.scene.addPath(path, pen)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setZValue(-0.5)
+            self._resolved_items.append(item)
+        self.execution_status.setText(str(description))
 
     def add_beam(self) -> None:
         if self.scene.add_mode:

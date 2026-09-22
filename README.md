@@ -56,13 +56,15 @@ Every label includes numerical theta. Normal incidence has a center symbol
 without an arbitrary-direction arrow. Disabled beams are gray and labelled;
 names, ordered numbers and selected-center color distinguish beams.
 
-The canvas deliberately shows no footprint ellipse or aperture-capture claim.
-External beam-normal radii are not laboratory footprint radii. A later host
-resolver must supply resolved geometry; LaunchPlane does not own material
-index, Snell refraction, cosine/flux normalization or power qualification.
-The editor displays a persistent **physical launch resolver not yet implemented**
-status. Focused launch and beam-normal screens remain deferred. Existing
-laboratory masks are outside this package and are not rotated by roll.
+External beam-normal radii are not laboratory footprint radii. A compatible
+host can supply resolved laboratory contours and qualified explanatory text via
+`set_resolved_preview`. Dashed contours scale in physical scene coordinates;
+external arrows remain distinct and fixed in display pixels. LaunchPlane does
+not compute material index, Snell refraction, flux normalization or capture.
+Without a host, the editor states that material-aware preview requires a
+compatible resolver. Intent changes invalidate the derived preview. Focused
+launch and beam-normal screens remain deferred; laboratory masks are not
+rotated by roll.
 
 ## Persistence and compatibility
 
@@ -114,15 +116,14 @@ LCProp owns the canonical
 That reference identifies a local development commit; the public remote may
 not yet contain it. The contract spans both packages but is not duplicated here.
 
-This standalone candidate is **not installed into or wired to LCProp**.
-LCProp remains on its existing LaunchPlane baseline until separately authorized
-coordinated integration. The removed laboratory-waist/wavevector API must not
-be recreated as an adapter to disguise physical intent as an old launch.
-Do not upgrade the dependency in an existing LCProp environment yet.
-Milestone 2 can consume the complete immutable intent above to implement the
-shared resolver. It must supply material context and qualification and migrate
-power consumers before enabling physical execution. No LC/PR sampled arrays,
-propagators, material models, screens or continuation change in this milestone.
+This candidate supplies the display seam consumed by the isolated LCProp
+Milestone 2 resolver. Neither repository is installed into authoritative
+environments yet. Integrate and install the reviewed pair together with the
+applications stopped. The schema-4 package must not be paired with an old
+LCProp laboratory-waist/wavevector adapter.
+
+LaunchPlane continues to own physical intent and presentation only. LCProp owns
+sampled fields, refraction, power qualification and scientific execution.
 
 ## Development
 

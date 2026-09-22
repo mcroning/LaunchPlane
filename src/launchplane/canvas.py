@@ -261,6 +261,7 @@ class TiltHandleItem(QGraphicsObject):
 class LaunchPlaneScene(QGraphicsScene):
     """Graphics scene containing the aperture and beam items."""
 
+    sceneAboutToReset = Signal()
     addBeamRequested = Signal(float, float)
     beamMoved = Signal(int, float, float)
     beamChanged = Signal(int, object)
@@ -339,6 +340,7 @@ class LaunchPlaneScene(QGraphicsScene):
         self.add_mode = False
 
     def _draw_static_scene(self) -> None:
+        self.sceneAboutToReset.emit()
         self.clear()
         self.beam_items = []
 
