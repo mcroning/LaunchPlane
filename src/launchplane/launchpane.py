@@ -121,7 +121,25 @@ class LaunchPlaneWidget(QWidget):
 
         layout = QVBoxLayout(self)
         self.splitter = QSplitter(Qt.Horizontal, self)
-        self.splitter.addWidget(self.view)
+        # Device-space annotations belong in a wrapping layout, not at
+        # physical scene anchors whose separation changes with zoom.
+        self.canvas_panel = QWidget(self)
+        canvas_layout = QVBoxLayout(self.canvas_panel)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        self.canvas_title = QLabel(
+            "Entrance centers · x right / y up · arrows: external direction",
+            self.canvas_panel,
+        )
+        self.canvas_bounds = QLabel(self.canvas_panel)
+        for label in (self.canvas_title, self.canvas_bounds):
+            label.setWordWrap(True)
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            canvas_layout.addWidget(label)
+        self._update_canvas_annotations()
+        self.scene.sceneAboutToReset.connect(self._update_canvas_annotations)
+        canvas_layout.addWidget(self.view, 1)
+        self.splitter.addWidget(self.canvas_panel)
         self.splitter.addWidget(side_panel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
@@ -275,6 +293,12 @@ class LaunchPlaneWidget(QWidget):
         self._update_button_states()
         self._sync_inspector()
 
+    def _update_canvas_annotations(self) -> None:
+        self.canvas_bounds.setText(
+            f"x: {self.scene.x_min:g} … {self.scene.x_max:g} µm    "
+            f"y: {self.scene.y_min:g} … {self.scene.y_max:g} µm"
+        )
+
     def clear_resolved_preview(self, _stack=None) -> None:
         """Invalidate host geometry whenever the physical intent changes."""
         for item in self._resolved_items:
@@ -299,7 +323,7 @@ class LaunchPlaneWidget(QWidget):
                 raise ValueError("resolved contours require at least three finite points")
             prepared.append(points)
         self.clear_resolved_preview()
-        pen = QPen(QColor("#247b91"))
+        pen = QPen(QColor("#62cddd"), 1.8)
         pen.setCosmetic(True)
         pen.setStyle(Qt.DashLine)
         for points in prepared:
@@ -309,7 +333,9 @@ class LaunchPlaneWidget(QWidget):
             path.closeSubpath()
             item = self.scene.addPath(path, pen)
             item.setAcceptedMouseButtons(Qt.NoButton)
-            item.setZValue(-0.5)
+            # Above the opaque aperture and axes (z=0), below beam handles
+            # and external-direction arrows (z=10).
+            item.setZValue(1.0)
             self._resolved_items.append(item)
         self.execution_status.setText(str(description))
 

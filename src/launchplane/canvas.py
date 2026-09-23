@@ -380,12 +380,6 @@ class LaunchPlaneScene(QGraphicsScene):
         self.addLine(self.x_min, 0.0, self.x_max, 0.0, axis_pen)
         self.addLine(0.0, -self.y_max, 0.0, -self.y_min, axis_pen)
 
-        title = self.addSimpleText("Entrance centers · x right / y up · arrows: external direction")
-        title.setBrush(QBrush(QColor(238, 239, 241)))
-        title.setFont(QFont("Sans Serif", 14, QFont.Bold))
-        title.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-        title.setPos(self.x_min, -self.y_max - 0.55 * y_margin)
-
         self._draw_scientific_axes(y_margin, x_margin)
 
     @staticmethod
@@ -524,18 +518,6 @@ class LaunchPlaneScene(QGraphicsScene):
             point_size=15,
             bold=True,
             rotation=-90.0,
-        )
-
-        bounds = self.addSimpleText(
-            f"x: {self.x_min:g} … {self.x_max:g} µm    "
-            f"y: {self.y_min:g} … {self.y_max:g} µm"
-        )
-        bounds.setBrush(QBrush(QColor(185, 190, 197)))
-        bounds.setFont(QFont("Sans Serif", 11, QFont.Bold))
-        bounds.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-        bounds.setPos(self.x_max, -self.y_max - 0.55 * y_margin)
-        bounds.setTransform(
-            QTransform.fromTranslate(-bounds.boundingRect().width(), 0.0)
         )
 
     def mousePressEvent(self, event) -> None:
