@@ -17,7 +17,7 @@ in degrees.
 | `wavelength_um` | Vacuum wavelength, positive |
 | `power_mW` | Nonnegative incident physical power through the external beam-normal plane, before the interface and laboratory screens |
 | `n_ext` | Positive index immediately outside the material entrance, default 1 |
-| `theta_ext_rad` | External polar angle from +z; `0 <= theta < pi/2` |
+| `theta_ext_rad` | Signed external tilt from +z at fixed phi; `-pi/2 < theta < pi/2` |
 | `phi_rad` | Azimuth from +x toward +y, normalized modulo `2*pi` |
 | `w1_um`, `w2_um` | Positive external beam-normal 1/e field (1/e² intensity) radii |
 | `psi_rad` | Independent profile roll, modulo `2*pi`; referenced to laboratory +x at normal incidence |
@@ -48,18 +48,40 @@ unchanged. Use `dataclasses.replace` to edit immutable definitions.
 
 The laboratory face uses x horizontal/right, y vertical/up; the Qt scene uses
 `(x, -y)`. Click to place, drag a center to move, and select to edit the inspector.
-The direction handle edits theta/phi without changing center or roll.
+The `Input face` caption and numeric beam labels keep the canvas concise.
+Theta can be positive or negative without changing phi; the entered sign is
+preserved in schema 4. Drag the center to position a beam without changing its
+direction. Drag the physical-exit arrowhead for approximate direction editing;
+numeric signed theta/phi remain the exact route. Roll stays independent.
+Arrowheads win overlapping hit targets, including over another beam's center.
+At zero tilt the coincident arrowhead remains interactive; drag it away to expose
+the center. Both handles have device-sized hit targets under zoom and Fit.
+Click a handle and use arrow keys for one-pixel nudges, Shift for ten pixels.
+Spinbox focus retains ordinary spinbox arrow-key behavior.
 
-Arrows have **display-pixel** length `80*sin(theta_ext)` by default, independent
-of zoom. They indicate external direction, not a trajectory through a material.
-Every label includes numerical theta. Normal incidence has a center symbol
-without an arbitrary-direction arrow. Disabled beams are gray and labelled;
-names, ordered numbers and selected-center color distinguish beams.
+A host installs `set_inverse_resolver(callback)`, where
+`callback(beam, exit_x_um, exit_y_um)` returns `(theta_ext_rad, phi_rad)` or raises
+`ValueError` with an availability reason. Product owns interface inversion and
+signed-branch continuity; LaunchPlane contains no refraction fallback. Without
+this callback direction editing is unavailable. Stack-change delivery and
+synchronous preview redelivery preserve the active mouse grab; missing redelivery
+invalidates previous geometry. Manual reciprocal crossing is possible by dragging
+each arrowhead onto the other entrance; no persistent Target mode is created.
+
+A compatible host supplies physical exit positions `(x0 + L*kx/kz_int,
+y0 + L*ky/kz_int)` to `set_resolved_preview(..., ray_endpoints=...)`, one pair
+(or `None`) per beam in stack order, including disabled beams. These internal
+rays scale with physical scene coordinates, never with a bounded pixel length.
+Disabled beams have no ray. Normal incidence retains its center and coincident
+interactive arrowhead, with zero physical shaft length.
+Without host endpoints the ray is explicitly unavailable.
+
+`Fit` reveals all physical centers, footprints and exit points. `Full Aperture`
+returns to the complete input-face extent. Neither changes launch geometry.
 
 External beam-normal radii are not laboratory footprint radii. A compatible
-host can supply resolved laboratory contours and qualified explanatory text via
-`set_resolved_preview`. Dashed contours scale in physical scene coordinates;
-external arrows remain distinct and fixed in display pixels. LaunchPlane does
+host supplies laboratory contours and qualified text via `set_resolved_preview`.
+Dashed contours scale in physical scene coordinates. LaunchPlane does
 not compute material index, Snell refraction, flux normalization or capture.
 Without a host, the editor states that material-aware preview requires a
 compatible resolver. Intent changes invalidate the derived preview. Focused

@@ -63,6 +63,7 @@ def example_beam_stack() -> BeamStackDefinition:
 class LaunchPlaneWidget(QWidget):
     """Reusable launch-plane canvas with basic beam collection controls."""
 
+    supports_resolved_internal_rays = True
     beamStackChanged = Signal(object)
 
     def __init__(
@@ -83,7 +84,10 @@ class LaunchPlaneWidget(QWidget):
         self.add_button = QPushButton("Add beam", self)
         self.delete_button = QPushButton("Delete selected", self)
         self.duplicate_button = QPushButton("Duplicate selected", self)
-        self.fit_button = QPushButton("Fit aperture", self)
+        self.fit_button = QPushButton("Fit", self)
+        self.full_aperture_button = QPushButton("Full Aperture", self)
+        self.fit_button.setToolTip("Show all footprints, centers and resolved ray endpoints")
+        self.full_aperture_button.setToolTip("Show the full input-face aperture")
         _increase_font_size(self.object_list, 2.0)
         for button in (
             self.add_button,
@@ -105,7 +109,8 @@ class LaunchPlaneWidget(QWidget):
         self.object_list.setMaximumHeight(145)
         side_layout.addWidget(self.object_list, 1)
         for buttons in ((self.add_button, self.delete_button),
-                        (self.duplicate_button, self.fit_button)):
+                        (self.duplicate_button,),
+                        (self.fit_button, self.full_aperture_button)):
             row = QHBoxLayout()
             for button in buttons:
                 row.addWidget(button)
@@ -127,7 +132,7 @@ class LaunchPlaneWidget(QWidget):
         canvas_layout = QVBoxLayout(self.canvas_panel)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         self.canvas_title = QLabel(
-            "Entrance centers · x right / y up · arrows: external direction",
+            "Input face",
             self.canvas_panel,
         )
         self.canvas_bounds = QLabel(self.canvas_panel)
@@ -149,7 +154,9 @@ class LaunchPlaneWidget(QWidget):
         layout.addWidget(self.execution_status)
 
         self.object_list.currentRowChanged.connect(self._select_scene_beam)
-        self.beamStackChanged.connect(self.clear_resolved_preview)
+        self._inverse_resolver = None
+        self._preview_current = False
+        self.scene.exitRequested.connect(self._exit_requested)
         self.scene.sceneAboutToReset.connect(self.clear_resolved_preview)
         self.scene.beamSelected.connect(self._select_list_beam)
         self.scene.beamMoved.connect(self._beam_moved)
@@ -158,7 +165,8 @@ class LaunchPlaneWidget(QWidget):
         self.add_button.clicked.connect(self.add_beam)
         self.delete_button.clicked.connect(self.delete_selected)
         self.duplicate_button.clicked.connect(self.duplicate_selected)
-        self.fit_button.clicked.connect(self._fit_aperture)
+        self.fit_button.clicked.connect(self.view.fit_all)
+        self.full_aperture_button.clicked.connect(self._fit_aperture)
 
         self.cancel_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
         self.cancel_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -190,7 +198,7 @@ class LaunchPlaneWidget(QWidget):
         self.y_spin = self._create_spin_box(-1.0e6, 1.0e6, 3, " µm")
         self.w1_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
         self.w2_spin = self._create_spin_box(0.001, 1.0e6, 3, " µm")
-        self.theta_spin = self._create_spin_box(0, 89.999999, 6, " °")
+        self.theta_spin = self._create_spin_box(-89.999999, 89.999999, 6, " °")
         self.phi_spin = self._create_spin_box(0, 360, 6, " °")
         self.psi_spin = self._create_spin_box(0, 360, 6, " °")
         self.n_ext_spin = self._create_spin_box(0.000001, 100, 6, "")
@@ -204,7 +212,7 @@ class LaunchPlaneWidget(QWidget):
         self.power_spin.setToolTip("Incident power through the external beam-normal plane, before interface/screens.")
         self.w1_spin.setToolTip("External beam-normal 1/e field (1/e² intensity) radius.")
         self.w2_spin.setToolTip(self.w1_spin.toolTip())
-        self.theta_spin.setToolTip("External polar angle from +z; grazing incidence is unsupported.")
+        self.theta_spin.setToolTip("Signed external tilt from +z at fixed phi; grazing incidence is unsupported.")
         self.phi_spin.setToolTip("Azimuth from +x toward +y; direction is undefined at normal incidence.")
         self.psi_spin.setToolTip("Profile roll, independent of direction; referenced to +x at normal incidence.")
         self.phase_spin.setToolTip("Phase at the beam-axis/entrance intersection (x0, y0, z=0).")
@@ -292,6 +300,7 @@ class LaunchPlaneWidget(QWidget):
         self.scene.set_selected_index(selected_index)
         self._update_button_states()
         self._sync_inspector()
+        self.view.arrange_beam_labels()
 
     def _update_canvas_annotations(self) -> None:
         self.canvas_bounds.setText(
@@ -299,17 +308,53 @@ class LaunchPlaneWidget(QWidget):
             f"y: {self.scene.y_min:g} … {self.scene.y_max:g} µm"
         )
 
-    def clear_resolved_preview(self, _stack=None) -> None:
+    def set_inverse_resolver(self, resolver) -> None:
+        """Host callback (beam, exit_x, exit_y) -> (signed theta, phi), in radians.
+
+        The host owns refraction and rejection of unreachable exits. LaunchPlane
+        neither persists endpoints nor provides a fallback optical model.
+        """
+        self._inverse_resolver = resolver
+
+    def _exit_requested(self, index: int, x: float, y: float) -> None:
+        if self._inverse_resolver is None:
+            self.execution_status.setText("Direction editing unavailable: host inverse resolver required.")
+            return
+        try:
+            beam = self._beam_stack.beams[index]
+            theta, phi = self._inverse_resolver(beam, x, y)
+            updated = replace(beam, theta_ext_rad=theta, phi_rad=phi)
+            updated.validate()
+        except ValueError as exc:
+            self.execution_status.setText(f"Direction unchanged: {exc}")
+            return
+        self._select_scene_beam(index)
+        self._apply_selected_beam(updated)
+
+    def _publish_stack(self) -> None:
+        # Synchronous host redelivery is atomic for the focused/mouse-grabbed
+        # handles. Hiding them between invalidation and redelivery loses Qt's
+        # mouse grab. Without redelivery, invalidate the old geometry explicitly.
+        self._preview_current = False
+        self.beamStackChanged.emit(self._beam_stack)
+        if not self._preview_current:
+            self.clear_resolved_preview()
+
+    def clear_resolved_preview(self, _stack=None, *, invalidate_rays=True) -> None:
         """Invalidate host geometry whenever the physical intent changes."""
         for item in self._resolved_items:
             if item.scene() is self.scene:
                 self.scene.removeItem(item)
         self._resolved_items.clear()
+        if invalidate_rays:
+            self._preview_current = False
+            for beam_item in self.scene.beam_items:
+                beam_item.set_resolved_exit(None)
         self.execution_status.setText(
-            "External physical intent. Material-aware preview requires a compatible host resolver."
+            "Internal ray unavailable. Material-aware preview requires a compatible host resolver."
         )
 
-    def set_resolved_preview(self, contours, *, description: str) -> None:
+    def set_resolved_preview(self, contours, *, description: str, ray_endpoints=None) -> None:
         """Display host-supplied laboratory (x,y) contours in physical micrometres.
 
         This seam does not compute refraction or infer geometry from intent.
@@ -322,7 +367,17 @@ class LaunchPlaneWidget(QWidget):
             if len(points) < 3 or not all(math.isfinite(v) for p in points for v in p):
                 raise ValueError("resolved contours require at least three finite points")
             prepared.append(points)
-        self.clear_resolved_preview()
+        endpoints = None
+        if ray_endpoints is not None:
+            endpoints = tuple(None if point is None else tuple(map(float, point))
+                              for point in ray_endpoints)
+            if len(endpoints) != len(self.scene.beam_items) or any(
+                point is not None and (len(point) != 2 or not all(map(math.isfinite, point)))
+                for point in endpoints
+            ):
+                raise ValueError("resolved ray endpoints must match beam indices and be finite x,y pairs")
+        self.clear_resolved_preview(invalidate_rays=False)
+        self._preview_current = True
         pen = QPen(QColor("#62cddd"), 1.8)
         pen.setCosmetic(True)
         pen.setStyle(Qt.DashLine)
@@ -334,10 +389,18 @@ class LaunchPlaneWidget(QWidget):
             item = self.scene.addPath(path, pen)
             item.setAcceptedMouseButtons(Qt.NoButton)
             # Above the opaque aperture and axes (z=0), below beam handles
-            # and external-direction arrows (z=10).
+            # and internal rays/center markers (z=10).
             item.setZValue(1.0)
             self._resolved_items.append(item)
-        self.execution_status.setText(str(description))
+        if endpoints is None:
+            for item in self.scene.beam_items:
+                item.set_resolved_exit(None)
+        else:
+            for item, endpoint in zip(self.scene.beam_items, endpoints):
+                item.set_resolved_exit(endpoint if item.beam.enabled else None)
+        self.view.arrange_beam_labels()
+        self.execution_status.setText(str(description) + (
+            " Internal ray unavailable: host did not supply endpoints." if endpoints is None else ""))
 
     def add_beam(self) -> None:
         if self.scene.add_mode:
@@ -361,7 +424,7 @@ class LaunchPlaneWidget(QWidget):
         beams = (*self._beam_stack.beams, beam)
         self.cancel_placement()
         self.set_beam_stack(BeamStackDefinition(beams=beams), len(beams) - 1)
-        self.beamStackChanged.emit(self._beam_stack)
+        self._publish_stack()
 
     def delete_selected(self) -> None:
         self.cancel_placement()
@@ -371,7 +434,7 @@ class LaunchPlaneWidget(QWidget):
         beams = self._beam_stack.beams[:index] + self._beam_stack.beams[index + 1 :]
         selected = min(index, len(beams) - 1) if beams else None
         self.set_beam_stack(BeamStackDefinition(beams=beams), selected)
-        self.beamStackChanged.emit(self._beam_stack)
+        self._publish_stack()
 
     def duplicate_selected(self) -> None:
         self.cancel_placement()
@@ -389,7 +452,7 @@ class LaunchPlaneWidget(QWidget):
         beams = list(self._beam_stack.beams)
         beams.insert(index + 1, duplicate)
         self.set_beam_stack(BeamStackDefinition(beams=tuple(beams)), index + 1)
-        self.beamStackChanged.emit(self._beam_stack)
+        self._publish_stack()
 
     def _unique_name(self, base: str, exclude_index: int | None = None) -> str:
         base = base.strip() or "Beam"
@@ -419,14 +482,14 @@ class LaunchPlaneWidget(QWidget):
         beams[index] = replace(beams[index], x_um=x_um, y_um=y_um)
         self._beam_stack = BeamStackDefinition(beams=tuple(beams))
         self._sync_inspector()
-        self.beamStackChanged.emit(self._beam_stack)
+        self._publish_stack()
 
     def _beam_changed(self, index: int, beam: BeamDefinition) -> None:
         beams = list(self._beam_stack.beams)
         beams[index] = beam
         self._beam_stack = BeamStackDefinition(beams=tuple(beams))
         self._sync_inspector()
-        self.beamStackChanged.emit(self._beam_stack)
+        self._publish_stack()
 
     def _name_edited(self) -> None:
         index = self._selected_index
@@ -483,7 +546,7 @@ class LaunchPlaneWidget(QWidget):
         item.blockSignals(False)
         self._update_object_list_item(index)
         self._sync_inspector()
-        self.beamStackChanged.emit(self._beam_stack)
+        self._publish_stack()
 
     def _update_object_list_item(self, index: int) -> None:
         beam = self._beam_stack.beams[index]

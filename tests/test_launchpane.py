@@ -286,74 +286,64 @@ def test_enabled_checkbox_updates_only_selected_beam() -> None:
     widget.close()
 
 
-@pytest.mark.parametrize('phi,expected', [(0,(40,0)), (90,(0,-40)), (180,(-40,0)),
-                                         (270,(0,40)), (45,(20*2**.5,-20*2**.5))])
-def test_physical_arrows_and_device_length(phi,expected):
-    app=QApplication.instance() or QApplication([])
-    beam=BeamDefinition(theta_ext_rad=math.pi/6,phi_rad=math.radians(phi),x_um=7,y_um=-13)
-    widget=LaunchPlaneWidget(beam_stack=BeamStackDefinition(beams=(beam,)))
+@pytest.mark.parametrize('phi', [0, 90, 180, 270, 45])
+def test_physical_rays_scale_with_scene_not_pixels(phi):
+    app = QApplication.instance() or QApplication([])
+    beam = BeamDefinition(theta_ext_rad=math.pi/6, phi_rad=math.radians(phi), x_um=7, y_um=-13)
+    widget = LaunchPlaneWidget(beam_stack=BeamStackDefinition(beams=(beam,)))
     try:
-        item=widget.scene.beam_items[0]
-        assert item.pos()==QPointF(7,13)
-        tip=item.tilt_tip_offset()
-        assert (tip.x(),tip.y())==pytest.approx(expected)
-        assert 'θext=30°' in item._label.text()
+        item = widget.scene.beam_items[0]
+        assert item._resolved_tip is None  # No fabricated ray without host.
+        dx, dy = 150*math.cos(math.radians(phi)), 150*math.sin(math.radians(phi))
+        widget.set_resolved_preview([], description='resolved', ray_endpoints=[(7+dx,-13+dy)])
+        tip = item.tilt_tip_offset()
+        assert (tip.x(),tip.y()) == pytest.approx((dx,-dy))
+        assert item._label.text() == '1'
         for scale in (0.5,1,3,10):
             widget.view._set_scale(scale)
-            device=item.deviceTransform(widget.view.viewportTransform())
-            delta=device.map(tip)-device.map(QPointF())
-            assert math.hypot(delta.x(),delta.y())==pytest.approx(40)
+            device = item.deviceTransform(widget.view.viewportTransform())
+            delta = device.map(tip)-device.map(QPointF())
+            assert math.hypot(delta.x(),delta.y()) == pytest.approx(150*scale)
     finally:
-        widget.close();widget.deleteLater();app.processEvents()
+        widget.close(); widget.deleteLater(); app.processEvents()
 
 
-def test_drag_uses_same_device_geometry_at_different_zoom():
-    app=QApplication.instance() or QApplication([])
-    widget=LaunchPlaneWidget(beam_stack=example_beam_stack())
+def test_signed_editor_and_center_drag_preserve_independent_intent():
+    app = QApplication.instance() or QApplication([])
+    widget = LaunchPlaneWidget(beam_stack=example_beam_stack())
     try:
         widget.object_list.setCurrentRow(1)
-        item=widget.scene.beam_items[1];before=item.beam
+        widget.theta_spin.setValue(-30)
+        widget.phi_spin.setValue(90)
+        before = widget.beam_stack.beams[1]
         for scale in (1,3,0.5):
             widget.view._set_scale(scale)
-            scene_to_device=widget.view.viewportTransform()
-            inverse,ok=scene_to_device.inverted();assert ok
-            origin=scene_to_device.map(item.scenePos())
-            event=QGraphicsSceneMouseEvent(QEvent.GraphicsSceneMouseMove)
-            event.setScenePos(inverse.map(origin+QPointF(0,-40)))
-            item._tilt_handle.mouseMoveEvent(event)
-            assert widget.beam_stack.beams[1].theta_ext_rad==pytest.approx(math.pi/6)
-            assert widget.beam_stack.beams[1].phi_rad==pytest.approx(math.pi/2)
-            assert widget.theta_spin.value()==pytest.approx(30)
-            assert widget.phi_spin.value()==pytest.approx(90)
-            assert (item.beam.x_um,item.beam.y_um)==(before.x_um,before.y_um)
-        item.setPos(-9,-17)
-        assert (widget.x_spin.value(),widget.y_spin.value())==(-9,17)
+            widget.scene.beam_items[1].setPos(-9,-17)
+            beam = widget.beam_stack.beams[1]
+            assert (beam.theta_ext_rad,beam.phi_rad,beam.psi_rad) == (before.theta_ext_rad,before.phi_rad,before.psi_rad)
+            assert (beam.x_um,beam.y_um) == (-9,17)
     finally:
-        widget.close();widget.deleteLater();app.processEvents()
+        widget.close(); widget.deleteLater(); app.processEvents()
 
 
-def test_normal_disabled_multi_beam_and_bounded_arrow():
-    app=QApplication.instance() or QApplication([])
-    beams=BeamStackDefinition(beams=(
-        BeamDefinition(name='normal',phi_rad=1.3),
-        BeamDefinition(name='high',theta_ext_rad=math.pi/2-1e-8,x_um=4,y_um=8,enabled=False),
-        BeamDefinition(name='opposite',theta_ext_rad=math.pi/4,phi_rad=math.pi,x_um=-4,y_um=-8)))
-    widget=LaunchPlaneWidget(beam_stack=beams)
+def test_normal_disabled_multi_beam_and_unavailable_ray():
+    app = QApplication.instance() or QApplication([])
+    beams = BeamStackDefinition(beams=(BeamDefinition(name='normal'),
+        BeamDefinition(name='disabled', enabled=False), BeamDefinition(name='opposite',theta_ext_rad=-.4)))
+    widget = LaunchPlaneWidget(beam_stack=beams)
     try:
-        normal,high,opposite=widget.scene.beam_items
-        assert normal.tilt_tip_offset()==QPointF()
+        assert all(item._resolved_tip is None for item in widget.scene.beam_items)
+        widget.set_resolved_preview([], description='host', ray_endpoints=[(0,0),(40,0),(-40,0)])
+        normal, disabled, opposite = widget.scene.beam_items
+        assert normal.tilt_tip_offset() == QPointF()
         assert normal._center_marker.isVisible()
-        assert math.hypot(high.tilt_tip_offset().x(),high.tilt_tip_offset().y())<=80
-        assert '[disabled]' in high._label.text()
-        assert opposite.tilt_tip_offset().x()<0
-        assert high.pos()==QPointF(4,-8) and opposite.pos()==QPointF(-4,8)
-        assert widget.scene.stack()==beams
-        widget.view.fit_aperture()
-        widget.show();app.processEvents()
-        # Exercise offscreen painting, not only stored geometry.
+        assert disabled._resolved_tip is None
+        assert opposite.tilt_tip_offset().x() == -40
+        assert [i._label.text() for i in widget.scene.beam_items] == ['1','2','3']
+        widget.show(); app.processEvents()
         assert not widget.grab().isNull()
     finally:
-        widget.close();widget.deleteLater();app.processEvents()
+        widget.close(); widget.deleteLater(); app.processEvents()
 
 
 def test_external_inspector_intent_roundtrip_without_execution_bridge():
@@ -401,7 +391,8 @@ def test_nonsquare_aperture_placement_and_clamping():
         item=widget.scene.beam_items[0];item.setPos(60,90)
         assert (widget.beam_stack.beams[0].x_um,widget.beam_stack.beams[0].y_um)==(40,-70)
         labels=[i.text() for i in widget.scene.items() if hasattr(i,'text')]
-        assert 'Laboratory x (µm)' in labels and 'Laboratory y (µm)' in labels
+        assert not any('Laboratory' in label for label in labels)
+        assert widget.canvas_title.text() == 'Input face'
     finally:
         widget.close();widget.deleteLater();app.processEvents()
 

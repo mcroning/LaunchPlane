@@ -65,8 +65,8 @@ class BeamDefinition:
                 raise ValueError(f"{name} must be positive")
         if self.power_mW < 0:
             raise ValueError("power_mW must be non-negative")
-        if not 0 <= self.theta_ext_rad < math.pi / 2:
-            raise ValueError("theta_ext_rad must satisfy 0 <= theta_ext_rad < pi/2")
+        if not -math.pi / 2 < self.theta_ext_rad < math.pi / 2:
+            raise ValueError("theta_ext_rad must satisfy -pi/2 < theta_ext_rad < pi/2")
         if self.profile != "collimated_gaussian":
             raise ValueError("Only collimated_gaussian physical intent is supported; focused launch is deferred")
         if not all(math.isfinite(k) for k in self.external_wavevector_rad_per_um):

@@ -40,7 +40,7 @@ def test_angle_wrapping_and_immutable_equality():
 
 
 @pytest.mark.parametrize('field,value', [
-    ('theta_ext_rad',-1e-9), ('theta_ext_rad',math.pi/2), ('theta_ext_rad',math.pi),
+    ('theta_ext_rad',-math.pi/2), ('theta_ext_rad',math.pi/2), ('theta_ext_rad',math.pi),
     ('n_ext',0), ('n_ext',-1), ('n_ext',math.inf), ('n_ext',math.nan),
     ('w1_um',0), ('w2_um',-1), ('wavelength_um',0), ('power_mW',-1),
     ('phi_rad',math.nan), ('psi_rad',math.inf), ('x_um',math.nan),

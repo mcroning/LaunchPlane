@@ -41,7 +41,7 @@ def test_invalid_host_contour_cannot_replace_good_preview():
         widget.set_resolved_preview([[(0, 0), (1, 0), (0, 1)]], description='valid')
         with pytest.raises(ValueError):
             widget.set_resolved_preview([[(0, 0), (1, float('nan')), (0, 1)]], description='invalid')
-        assert widget.execution_status.text() == 'valid'
+        assert widget.execution_status.text().startswith('valid')
         assert len(widget._resolved_items) == 1
     finally:
         widget.close()

@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QRadialGradient,
+    QPolygonF,
     QTransform,
 )
 from PySide6.QtWidgets import (
@@ -43,15 +44,12 @@ class BeamItem(QGraphicsObject):
         index: int,
         beam: BeamDefinition,
         *,
-        direction_arrow_length: float = 80.0,
         parent: QGraphicsItem | None = None,
     ):
         super().__init__(parent)
         self.index = int(index)
         self.beam = beam
-        if not math.isfinite(direction_arrow_length) or direction_arrow_length <= 0:
-            raise ValueError("direction_arrow_length must be finite and positive")
-        self.direction_arrow_length = float(direction_arrow_length)
+        self._resolved_tip: QPointF | None = None
         self._hovered = False
         self._refreshing = False
 
@@ -60,57 +58,51 @@ class BeamItem(QGraphicsObject):
             | QGraphicsItem.ItemIsSelectable
             | QGraphicsItem.ItemSendsGeometryChanges
         )
-        self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self.setAcceptHoverEvents(True)
         self.setZValue(10)
 
-        self._center_marker = CenterMarkerItem(self)
+        # Top-level handles share global z bands: every arrow beats every center.
+        # They are scene-owned, not children of differently stacked beam items.
+        self._ray_head = RayHandleItem(self, arrow=True)
+        self._center_marker = RayHandleItem(self, arrow=False)
+        self.setAcceptedMouseButtons(Qt.NoButton)
         self._label = QGraphicsSimpleTextItem(self)
         self._label.setBrush(QBrush(QColor(235, 235, 235)))
         self._label.setFont(QFont("Sans Serif", 12, QFont.Bold))
         self._label.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self._label.setAcceptedMouseButtons(Qt.NoButton)
         self._label.setPos(6.0, -16.0)
-        self._tilt_handle = TiltHandleItem(self)
         self.refresh(beam)
 
     def refresh(self, beam: BeamDefinition) -> None:
         self.prepareGeometryChange()
         self.beam = beam
-        self._label.setText(f"{self.index + 1}. {beam.name} · θext={math.degrees(beam.theta_ext_rad):.4g}°" + (" [disabled]" if not beam.enabled else ""))
+        self._label.setText(str(self.index + 1))
         self._refreshing = True
         try:
             self.setPos(beam.x_um, -beam.y_um)
         finally:
             self._refreshing = False
-        self._update_tilt_handle()
+        self._center_marker.setPos(self.pos())
+        self.update()
+
+    def set_resolved_exit(self, exit_xy: tuple[float, float] | None) -> None:
+        """Host-owned physical endpoint; never infer a ray from external intent."""
+        self.prepareGeometryChange()
+        self._resolved_tip = (None if exit_xy is None else
+                              QPointF(exit_xy[0] - self.beam.x_um,
+                                      -(exit_xy[1] - self.beam.y_um)))
+        tip = self.tilt_tip_offset()
+        self._ray_head.setPos(self.pos() + tip)
+        self._ray_head.setRotation(math.degrees(math.atan2(tip.y(), tip.x())))
+        self._ray_head.setVisible(self.beam.enabled and self._resolved_tip is not None)
+        self.setToolTip("Internal ray unavailable: requires a compatible host resolver."
+                        if exit_xy is None else "Resolved internal entrance-to-exit ray")
         self.update()
 
     def tilt_tip_offset(self) -> QPointF:
-        """Bounded display-pixel arrow, never a physical trajectory."""
-        length = self.direction_arrow_length * math.sin(self.beam.theta_ext_rad)
-        return QPointF(length * math.cos(self.beam.phi_rad), -length * math.sin(self.beam.phi_rad))
-
-    def set_tilt_tip(self, scene_position: QPointF) -> None:
-        """Edit external direction using the same device mapping as painting."""
-        views = self.scene().views() if self.scene() else []
-        if not views:
-            return
-        transform = views[0].viewportTransform()
-        inverse, valid = self.deviceTransform(transform).inverted()
-        if not valid:
-            return
-        offset = inverse.map(transform.map(scene_position))
-        radius = math.hypot(offset.x(), offset.y())
-        # Drag saturation is a UI limit; model validation never clips inputs.
-        theta = math.asin(min(radius / self.direction_arrow_length, math.sin(math.radians(89.999999))))
-        phi = math.atan2(-offset.y(), offset.x()) if radius else self.beam.phi_rad
-        self.refresh(replace(self.beam, theta_ext_rad=theta, phi_rad=phi))
-        self.changed.emit(self.index, self.beam)
-
-    def _update_tilt_handle(self) -> None:
-        self._tilt_handle.setPos(self.tilt_tip_offset())
-        self._tilt_handle.setToolTip("External direction: bounded sin(theta) display length; drag to edit theta/phi.")
+        """Physical scene displacement in µm (Qt y down), not display pixels."""
+        return QPointF() if self._resolved_tip is None else QPointF(self._resolved_tip)
 
     def boundingRect(self) -> QRectF:
         tip = self.tilt_tip_offset()
@@ -119,12 +111,12 @@ class BeamItem(QGraphicsObject):
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
-        path.addEllipse(QRectF(-7, -7, 14, 14))
+        # Shafts never intercept either handle.
         return path
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
         del option, widget
-        # No fabricated footprint: centers and external directions only.
+        # Host-resolved geometry only; no inferred direction glyph.
         self._paint_tilt_arrow(painter)
 
     def _paint_tilt_arrow(self, painter: QPainter) -> None:
@@ -132,7 +124,7 @@ class BeamItem(QGraphicsObject):
         dx = tip.x()
         dy = tip.y()
         length = math.hypot(dx, dy)
-        if self.beam.theta_ext_rad == 0:
+        if self._resolved_tip is None or not self.beam.enabled or length == 0:
             return
 
         end = QPointF(dx, dy)
@@ -141,18 +133,6 @@ class BeamItem(QGraphicsObject):
         arrow_pen.setCosmetic(True)
         painter.setPen(arrow_pen)
         painter.drawLine(QPointF(0.0, 0.0), end)
-
-        ux, uy = dx / length, dy / length
-        px, py = -uy, ux
-        head = min(2.2, length * 0.4)
-        p1 = QPointF(dx - head * ux + 0.55 * head * px, dy - head * uy + 0.55 * head * py)
-        p2 = QPointF(dx - head * ux - 0.55 * head * px, dy - head * uy - 0.55 * head * py)
-        path = QPainterPath(end)
-        path.lineTo(p1)
-        path.lineTo(p2)
-        path.closeSubpath()
-        painter.setBrush(QBrush(arrow_color))
-        painter.drawPath(path)
 
     def hoverEnterEvent(self, event) -> None:
         self._hovered = True
@@ -183,78 +163,101 @@ class BeamItem(QGraphicsObject):
             x_um = float(position.x())
             y_um = -float(position.y())
             self.beam = replace(self.beam, x_um=x_um, y_um=y_um)
-            self.moved.emit(self.index, x_um, y_um)
+            self._center_marker.setPos(position)
+            self._ray_head.setPos(position + self.tilt_tip_offset())
+            if not self._refreshing:
+                self.moved.emit(self.index, x_um, y_um)
 
         if change == QGraphicsItem.ItemSelectedHasChanged:
             selected = bool(value)
-            self._tilt_handle.setVisible(selected)
             self._center_marker.update()
+            self._ray_head.update()
             if selected:
                 self.selected.emit(self.index)
 
         return super().itemChange(change, value)
 
 
-class CenterMarkerItem(QGraphicsItem):
-    """Constant-screen-size marker at a beam center."""
+class RayHandleItem(QGraphicsItem):
+    """Scene-owned device-sized handle; all physical updates go through its beam."""
 
-    def __init__(self, parent: BeamItem):
-        super().__init__(parent)
-        self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-        self.setAcceptedMouseButtons(Qt.NoButton)
-        self.setZValue(2)
-
-    def boundingRect(self) -> QRectF:
-        return QRectF(-6.0, -6.0, 12.0, 12.0)
-
-    def paint(self, painter: QPainter, option, widget=None) -> None:
-        del option, widget
-        beam_item = self.parentItem()
-        color = QColor(255, 190, 70) if beam_item.isSelected() else QColor(90, 180, 255)
-        if not beam_item.beam.enabled:
-            color = QColor(120, 120, 120)
-        pen = QPen(color, 1.5)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.setBrush(QBrush(color))
-        painter.drawEllipse(QPointF(), 2.5, 2.5)
-        painter.drawLine(QPointF(-5.0, 0.0), QPointF(5.0, 0.0))
-        painter.drawLine(QPointF(0.0, -5.0), QPointF(0.0, 5.0))
-
-
-class TiltHandleItem(QGraphicsObject):
-    """Constant-screen-size draggable handle for a beam's tilt tip."""
-
-    def __init__(self, parent: BeamItem):
-        super().__init__(parent)
-        self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+    def __init__(self, beam_item: BeamItem, *, arrow: bool):
+        super().__init__()
+        self.beam_item = beam_item
+        self.arrow = arrow
+        self.setFlags(QGraphicsItem.ItemIgnoresTransformations | QGraphicsItem.ItemIsFocusable)
         self.setAcceptedMouseButtons(Qt.LeftButton)
-        self.setCursor(Qt.CrossCursor)
-        self.setZValue(3)
-        self.setVisible(False)
+        self.setZValue(30 if arrow else 20)
+        self.setCursor(Qt.OpenHandCursor)
+        self._press_offset = QPointF()
+        if arrow:
+            self.hide()
+        self.setToolTip("Drag exit to set direction; arrows nudge, Shift ×10" if arrow else
+                        "Drag entrance center; arrows nudge, Shift ×10")
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-5.0, -5.0, 10.0, 10.0)
+        return QRectF(-18, -10, 28, 20) if self.arrow else QRectF(-8, -8, 16, 16)
+
+    def shape(self) -> QPainterPath:
+        path = QPainterPath()
+        if self.arrow:
+            path.addRect(self.boundingRect())
+        else:
+            path.addEllipse(self.boundingRect())
+        return path
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
         del option, widget
-        pen = QPen(QColor(255, 235, 235), 1.5)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.setBrush(QBrush(QColor(220, 55, 55)))
-        painter.drawEllipse(self.boundingRect())
+        beam = self.beam_item
+        color = QColor(255, 190, 70) if beam.isSelected() else QColor(90, 180, 255)
+        if not beam.beam.enabled:
+            color = QColor(120, 120, 120)
+        painter.setPen(QPen(color, 1.5))
+        painter.setBrush(QBrush(color))
+        if self.arrow:
+            # Tip stays exactly at the physical exit, even for a zero-length ray.
+            painter.drawPolygon(QPolygonF([QPointF(), QPointF(-15, 7), QPointF(-11, 0), QPointF(-15, -7)]))
+        else:
+            painter.drawEllipse(QPointF(), 2.5, 2.5)
+            painter.drawLine(QPointF(-5, 0), QPointF(5, 0))
+            painter.drawLine(QPointF(0, -5), QPointF(0, 5))
+        if self.hasFocus():
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(), 7, 7)
 
     def mousePressEvent(self, event) -> None:
-        beam_item = self.parentItem()
-        beam_item.setSelected(True)
+        self.scene().set_selected_index(self.beam_item.index)
+        self.setFocus(Qt.MouseFocusReason)
+        self._press_offset = self.scenePos() - event.scenePos()
+        self.setCursor(Qt.ClosedHandCursor)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
-        beam_item = self.parentItem()
-        beam_item.set_tilt_tip(event.scenePos())
+        self._move_to(event.scenePos() + self._press_offset)
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
+        self.setCursor(Qt.OpenHandCursor)
+        event.accept()
+
+    def _move_to(self, position: QPointF) -> None:
+        if self.arrow:
+            self.scene().exitRequested.emit(self.beam_item.index, position.x(), -position.y())
+        else:
+            self.beam_item.setPos(position)
+
+    def keyPressEvent(self, event) -> None:
+        directions = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0),
+                      Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}
+        if event.key() not in directions or not self.scene().views():
+            super().keyPressEvent(event)
+            return
+        dx, dy = directions[event.key()]
+        step = 10 if event.modifiers() & Qt.ShiftModifier else 1
+        inverse, valid = self.scene().views()[0].viewportTransform().inverted()
+        if valid:
+            delta = inverse.map(QPointF(step*dx, step*dy)) - inverse.map(QPointF())
+            self._move_to(self.scenePos() + delta)
         event.accept()
 
 
@@ -266,20 +269,16 @@ class LaunchPlaneScene(QGraphicsScene):
     beamMoved = Signal(int, float, float)
     beamChanged = Signal(int, object)
     beamSelected = Signal(int)
+    exitRequested = Signal(int, float, float)
 
     def __init__(
         self,
         definition: LaunchPlaneDefinition | None = None,
         parent=None,
-        *,
-        direction_arrow_length: float = 80.0,
     ):
         super().__init__(parent)
         self.definition = definition or LaunchPlaneDefinition()
         self.definition.validate()
-        if not math.isfinite(direction_arrow_length) or direction_arrow_length <= 0:
-            raise ValueError("direction_arrow_length must be positive")
-        self.direction_arrow_length = float(direction_arrow_length)
         self.add_mode = False
         self.beam_items: list[BeamItem] = []
         self.setBackgroundBrush(QBrush(QColor(28, 31, 36)))
@@ -314,12 +313,13 @@ class LaunchPlaneScene(QGraphicsScene):
             item = BeamItem(
                 index,
                 beam,
-                direction_arrow_length=self.direction_arrow_length,
             )
             item.moved.connect(self.beamMoved)
             item.changed.connect(self.beamChanged)
             item.selected.connect(self.beamSelected)
             self.addItem(item)
+            self.addItem(item._center_marker)
+            self.addItem(item._ray_head)
             self.beam_items.append(item)
 
     def stack(self) -> BeamStackDefinition:
@@ -496,30 +496,6 @@ class LaunchPlaneScene(QGraphicsScene):
                 )
             )
 
-        horizontal_title = self._add_axis_text(
-            "Laboratory x (µm)",
-            QPointF(0.0, self.y_max + 0.58 * y_margin),
-            point_size=15,
-            bold=True,
-        )
-        horizontal_title.setTransform(
-            QTransform.fromTranslate(
-                -0.5 * horizontal_title.boundingRect().width(),
-                0.0,
-            )
-        )
-
-        vertical_title = self._add_axis_text(
-            "Laboratory y (µm)",
-            QPointF(
-                self.x_min - 0.72 * x_margin,
-                0.16 * self.definition.y_aperture_um,
-            ),
-            point_size=15,
-            bold=True,
-            rotation=-90.0,
-        )
-
     def mousePressEvent(self, event) -> None:
         if self.add_mode and event.button() == Qt.LeftButton:
             position = event.scenePos()
@@ -538,7 +514,7 @@ class LaunchPlaneScene(QGraphicsScene):
 class LaunchPlaneView(QGraphicsView):
     """View with scroll panning, modified-scroll zoom, and drag panning."""
 
-    minimum_scale = 0.5
+    minimum_scale = 1.0e-8
     maximum_scale = 50.0
 
     def __init__(self, scene: LaunchPlaneScene, parent=None):
@@ -555,11 +531,42 @@ class LaunchPlaneView(QGraphicsView):
         self._panning = False
         self._pan_start = None
 
+    def fit_all(self) -> None:
+        """Reveal the full physical geometry without shortening any ray."""
+        scene = self.scene()
+        if scene is not None:
+            rect = scene.sceneRect().united(scene.itemsBoundingRect())
+            self.setSceneRect(rect)
+            self.fitInView(rect.adjusted(-10, -10, 10, 10), Qt.KeepAspectRatio)
+            self.arrange_beam_labels()
+
+    def arrange_beam_labels(self) -> None:
+        """Separate number labels in device space, including coincident beams."""
+        scene = self.scene()
+        if not isinstance(scene, LaunchPlaneScene):
+            return
+        occupied = []
+        scale = max(abs(self.transform().m11()), 1e-12)
+        for item in scene.beam_items:
+            label = item._label
+            for row in range(len(scene.beam_items) + 1):
+                label.setPos(8 / scale, (-18 - row * (label.boundingRect().height() + 5)) / scale)
+                rect = label.deviceTransform(self.viewportTransform()).mapRect(label.boundingRect())
+                if not any(rect.adjusted(-2,-2,2,2).intersects(other) for other in occupied):
+                    break
+            occupied.append(rect)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.arrange_beam_labels()
+
     def fit_aperture(self) -> None:
         scene = self.scene()
         if scene is not None:
+            self.setSceneRect(scene.sceneRect())
             self.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
             self._clamp_current_scale()
+            self.arrange_beam_labels()
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.ControlModifier:
@@ -587,6 +594,7 @@ class LaunchPlaneView(QGraphicsView):
         if current_scale > 0:
             factor = target_scale / current_scale
             self.scale(factor, factor)
+            self.arrange_beam_labels()
 
     def _clamp_current_scale(self) -> None:
         self._set_scale(self.transform().m11())
