@@ -243,7 +243,7 @@ def test_laser_combo_creates_new_group_and_rejects_empty_name() -> None:
     widget.close()
 
 
-def test_primary_controls_fit_default_layout_without_scrolling() -> None:
+def test_primary_controls_and_inspector_remain_accessible() -> None:
     app = QApplication.instance() or QApplication([])
     widget = LaunchPlaneWidget(beam_stack=example_beam_stack())
     widget.resize(1280, 860)
@@ -258,7 +258,10 @@ def test_primary_controls_fit_default_layout_without_scrolling() -> None:
     assert widget.fit_button.isVisibleTo(widget)
     assert widget.laser_combo.isVisibleTo(widget)
     assert widget.phase_spin.isVisibleTo(widget)
-    assert widget.inspector_scroll.verticalScrollBar().maximum() == 0
+    widget.inspector_scroll.ensureWidgetVisible(widget.derived_k)
+    app.processEvents()
+    assert widget.inspector_scroll.viewport().rect().contains(
+        widget.derived_k.mapTo(widget.inspector_scroll.viewport(), QPoint(0, 0)))
     widget.close()
 
 
@@ -422,7 +425,10 @@ def test_layout_remains_responsive(width):
         assert widget.size().width()==width
         assert widget.view.width()>300
         assert widget.inspector_scroll.horizontalScrollBar().maximum()==0
-        assert widget.inspector_scroll.verticalScrollBar().maximum()==0
+        widget.inspector_scroll.ensureWidgetVisible(widget.derived_k)
+        app.processEvents()
+        assert widget.inspector_scroll.viewport().rect().contains(
+            widget.derived_k.mapTo(widget.inspector_scroll.viewport(), QPoint(0, 0)))
         assert widget.execution_status.isVisibleTo(widget)
     finally:
         widget.close();widget.deleteLater();app.processEvents()

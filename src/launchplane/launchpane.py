@@ -6,8 +6,8 @@ import math
 import sys
 from dataclasses import replace
 
-from PySide6.QtCore import QPointF, QTimer, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QPainterPath, QPen, QColor
+from PySide6.QtCore import QEvent, QPointF, QTimer, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QPainterPath, QPen, QColor, QValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -60,6 +61,23 @@ def example_beam_stack() -> BeamStackDefinition:
     ))
 
 
+class IntentSpinBox(QDoubleSpinBox):
+    """Keep invalid pending intent visible instead of Qt's previous-value fixup."""
+
+    def event(self, event) -> bool:
+        # QAbstractSpinBox also fixes up text on Hide (e.g. switching to Results).
+        if (event.type() in (QEvent.FocusOut, QEvent.FocusAboutToChange, QEvent.Hide)
+                and not self.hasAcceptableInput()):
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not self.hasAcceptableInput():
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class LaunchPlaneWidget(QWidget):
     """Reusable launch-plane canvas with basic beam collection controls."""
 
@@ -76,6 +94,11 @@ class LaunchPlaneWidget(QWidget):
         self._resolved_items = []
         self._selected_index: int | None = None
         self._updating_inspector = False
+        self._committing_pending_edits = False
+        # Session-local ownership follows the immutable beam through replacements.
+        # Keep a strong reference: object identity is not a persisted beam ID.
+        self._editor_owner = None
+        self._editor_drafts = {}
         self.scene = LaunchPlaneScene(launch_plane or LaunchPlaneDefinition(), self)
         self.view = LaunchPlaneView(self.scene, self)
         self.object_list = QListWidget(self)
@@ -121,7 +144,7 @@ class LaunchPlaneWidget(QWidget):
         self.inspector_scroll.setWidgetResizable(True)
         self.inspector_scroll.setFrameShape(QScrollArea.NoFrame)
         self.inspector_scroll.setWidget(self.inspector)
-        self.inspector_scroll.setMinimumHeight(420)
+        self.inspector_scroll.setMinimumHeight(160)
         side_layout.addWidget(self.inspector_scroll, 3)
 
         layout = QVBoxLayout(self)
@@ -143,15 +166,36 @@ class LaunchPlaneWidget(QWidget):
             canvas_layout.addWidget(label)
         self._update_canvas_annotations()
         self.scene.sceneAboutToReset.connect(self._update_canvas_annotations)
-        canvas_layout.addWidget(self.view, 1)
+        axes_layout = QGridLayout()
+        self.x_axis_label = QLabel("x (µm)", self.canvas_panel)
+        self.y_axis_label = QLabel("y (µm)", self.canvas_panel)
+        self.x_axis_label.setAlignment(Qt.AlignCenter)
+        self.y_axis_label.setAlignment(Qt.AlignCenter)
+        axes_layout.addWidget(self.y_axis_label, 0, 0)
+        axes_layout.addWidget(self.view, 0, 1)
+        axes_layout.addWidget(self.x_axis_label, 1, 1)
+        axes_layout.setColumnStretch(1, 1)
+        axes_layout.setRowStretch(0, 1)
+        canvas_layout.addLayout(axes_layout, 1)
         self.splitter.addWidget(self.canvas_panel)
         self.splitter.addWidget(side_panel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setSizes([900, 360])
         layout.addWidget(self.splitter, 1)
-        self.execution_status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        layout.addWidget(self.execution_status)
+        # A bounded, wrapping region preserves qualifications without stealing
+        # the canvas height when many beams are present. Overflow is scrollable.
+        self.execution_status.setMinimumWidth(0)
+        self.execution_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+        self.status_scroll = QScrollArea(self)
+        self.status_scroll.setWidgetResizable(True)
+        self.status_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.status_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.status_scroll.setWidget(self.execution_status)
+        line_height = self.execution_status.fontMetrics().lineSpacing()
+        self.status_scroll.setMinimumHeight(3 * line_height)
+        self.status_scroll.setMaximumHeight(6 * line_height)
+        layout.addWidget(self.status_scroll)
 
         self.object_list.currentRowChanged.connect(self._select_scene_beam)
         self._inverse_resolver = None
@@ -179,7 +223,9 @@ class LaunchPlaneWidget(QWidget):
         inspector = QGroupBox("Selected beam", self)
         form = QFormLayout(inspector)
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(2)
+        form.setVerticalSpacing(6)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.name_edit = QLineEdit(inspector)
         self.enabled_checkbox = QCheckBox(inspector)
@@ -205,6 +251,8 @@ class LaunchPlaneWidget(QWidget):
         self.phase_spin = self._create_spin_box(-1.0e6, 1.0e6, 6, " rad")
         self.derived_k = QLabel(inspector)
         self.derived_k.setWordWrap(True)
+        self.derived_k.setMinimumWidth(0)
+        self.derived_k.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
         self.execution_status = QLabel(
             "Intent editor only — physical launch resolver not yet implemented. "
             "No sampled fields, refraction, footprint or physical power execution.", inspector)
@@ -225,9 +273,11 @@ class LaunchPlaneWidget(QWidget):
             ("External theta", self.theta_spin), ("Azimuth phi", self.phi_spin),
             ("Profile roll psi", self.psi_spin), ("External index n_ext", self.n_ext_spin),
             ("Entrance phase", self.phase_spin), ("Laser", self.laser_combo),
-            ("Derived kx, ky (rad/µm)", self.derived_k),
         ):
+            editor.setAccessibleName(label)
             form.addRow(label, editor)
+        form.addRow(QLabel("Derived kx, ky (rad/µm)", inspector))
+        form.addRow(self.derived_k)
         self._numeric_editors = {
             "power_mW": self.power_spin, "wavelength_um": self.wavelength_spin,
             "x_um": self.x_spin, "y_um": self.y_spin,
@@ -261,12 +311,84 @@ class LaunchPlaneWidget(QWidget):
         decimals: int,
         suffix: str,
     ) -> QDoubleSpinBox:
-        editor = QDoubleSpinBox(self)
+        editor = IntentSpinBox(self)
         editor.setDecimals(decimals)
         editor.setRange(minimum, maximum)
         editor.setSuffix(suffix)
         editor.setKeyboardTracking(False)
         return editor
+
+    def _capture_pending_edits(self) -> None:
+        if self._updating_inspector or self._editor_owner is None:
+            return
+        drafts = {}
+        for field, editor in {**self._numeric_editors, **self._angular_editors}.items():
+            text = editor.lineEdit().text()
+            if not editor.hasAcceptableInput() or editor.valueFromText(text) != editor.value():
+                drafts[field] = text
+        key = id(self._editor_owner)
+        if drafts:
+            self._editor_drafts[key] = (self._editor_owner, drafts)
+        else:
+            self._editor_drafts.pop(key, None)
+
+    def _transfer_editor_owner(self, previous, replacement) -> None:
+        self._capture_pending_edits()
+        saved = self._editor_drafts.pop(id(previous), None)
+        if saved is not None:
+            self._editor_drafts[id(replacement)] = (replacement, saved[1])
+        if self._editor_owner is previous:
+            self._editor_owner = replacement
+
+    def commit_pending_edits(self) -> None:
+        """Validate every beam's drafts before applying canonical model updates.
+
+        Invalid text survives selection and unrelated model refreshes. Qt owns
+        parsing/ranges; the model owns scientific validation. No request escapes
+        with a partially validated stack, including drafts on unselected beams.
+        """
+        if self._committing_pending_edits:
+            return
+        self._committing_pending_edits = True
+        try:
+            self._capture_pending_edits()
+            editors = {**self._numeric_editors, **self._angular_editors}
+            updates = []
+            for index, beam in enumerate(self._beam_stack.beams):
+                changes = {}
+                drafts = self._editor_drafts.get(id(beam), (beam, {}))[1]
+                for field, text in drafts.items():
+                    editor = editors[field]
+                    if editor.validate(text, 0)[0] != QValidator.Acceptable:
+                        self.object_list.setCurrentRow(index)
+                        self.inspector_scroll.ensureWidgetVisible(editor)
+                        editor.setFocus()
+                        raise ValueError(
+                            f"Invalid pending beam edit: {editor.accessibleName()} "
+                            f"({text!r}) in {beam.name}; correct the value before Run."
+                        )
+                    value = editor.valueFromText(text)
+                    changes[field] = math.radians(value) if field in self._angular_editors else value
+                if index == self._selected_index:
+                    name = self._unique_name(self.name_edit.text(), exclude_index=index)
+                    group = self.laser_combo.currentText().strip()
+                    if not group:
+                        raise ValueError("Invalid pending beam edit: Laser must not be empty.")
+                    if name != beam.name:
+                        changes['name'] = name
+                    if group != beam.coherence_group:
+                        changes['coherence_group'] = group
+                updated = replace(beam, **changes)
+                updated.validate()
+                updates.append(updated)
+            BeamStackDefinition(beams=tuple(updates)).validate()
+            # Only after all drafts validate can widget/model synchronization
+            # replace them. Ordinary field commits clear only their own draft.
+            self._editor_drafts.clear()
+            self._editor_owner = None
+            self._apply_beam_updates(updates)
+        finally:
+            self._committing_pending_edits = False
 
     @property
     def beam_stack(self) -> BeamStackDefinition:
@@ -280,6 +402,10 @@ class LaunchPlaneWidget(QWidget):
         selected_index: int | None = None,
     ) -> None:
         beam_stack.validate()
+        self._capture_pending_edits()
+        retained = {id(beam) for beam in beam_stack.beams}
+        if any(key not in retained for key in self._editor_drafts):
+            raise ValueError("Unresolved beam edits must be corrected before replacing or deleting their beam.")
         self._beam_stack = beam_stack
         self.clear_resolved_preview()
         self.scene.set_stack(beam_stack)
@@ -431,6 +557,10 @@ class LaunchPlaneWidget(QWidget):
         index = self._selected_index
         if index is None:
             return
+        self._capture_pending_edits()
+        if id(self._beam_stack.beams[index]) in self._editor_drafts:
+            self.execution_status.setText("Correct pending beam edits before deleting this beam.")
+            return
         beams = self._beam_stack.beams[:index] + self._beam_stack.beams[index + 1 :]
         selected = min(index, len(beams) - 1) if beams else None
         self.set_beam_stack(BeamStackDefinition(beams=beams), selected)
@@ -479,13 +609,16 @@ class LaunchPlaneWidget(QWidget):
 
     def _beam_moved(self, index: int, x_um: float, y_um: float) -> None:
         beams = list(self._beam_stack.beams)
-        beams[index] = replace(beams[index], x_um=x_um, y_um=y_um)
+        previous = beams[index]
+        beams[index] = replace(previous, x_um=x_um, y_um=y_um)
+        self._transfer_editor_owner(previous, beams[index])
         self._beam_stack = BeamStackDefinition(beams=tuple(beams))
         self._sync_inspector()
         self._publish_stack()
 
     def _beam_changed(self, index: int, beam: BeamDefinition) -> None:
         beams = list(self._beam_stack.beams)
+        self._transfer_editor_owner(beams[index], beam)
         beams[index] = beam
         self._beam_stack = BeamStackDefinition(beams=tuple(beams))
         self._sync_inspector()
@@ -529,22 +662,29 @@ class LaunchPlaneWidget(QWidget):
         index = self._selected_index
         if index is None:
             return
-        if beam == self._beam_stack.beams[index]:
+        beams = list(self._beam_stack.beams)
+        beams[index] = beam
+        self._apply_beam_updates(beams)
+
+    def _apply_beam_updates(self, beams) -> None:
+        """Publish a fully validated stack once, for normal or pending commits."""
+        beam_stack = BeamStackDefinition(beams=tuple(beams))
+        beam_stack.validate()
+        changed = [i for i, (old, new) in enumerate(zip(self._beam_stack.beams, beams))
+                   if old != new]
+        if not changed:
             self._sync_inspector()
             return
         self.cancel_placement()
-        beams = list(self._beam_stack.beams)
-        beam.validate()
-        beams[index] = beam
-        beam_stack = BeamStackDefinition(beams=tuple(beams))
-        beam_stack.validate()
+        for index in changed:
+            self._transfer_editor_owner(self._beam_stack.beams[index], beams[index])
         self._beam_stack = beam_stack
-
-        item = self.scene.beam_items[index]
-        item.blockSignals(True)
-        item.refresh(beam)
-        item.blockSignals(False)
-        self._update_object_list_item(index)
+        for index in changed:
+            item = self.scene.beam_items[index]
+            item.blockSignals(True)
+            item.refresh(beams[index])
+            item.blockSignals(False)
+            self._update_object_list_item(index)
         self._sync_inspector()
         self._publish_stack()
 
@@ -555,6 +695,7 @@ class LaunchPlaneWidget(QWidget):
         )
 
     def _sync_inspector(self) -> None:
+        self._capture_pending_edits()
         index = self._selected_index
         has_selection = index is not None and 0 <= index < len(self._beam_stack.beams)
         self.inspector.setEnabled(has_selection)
@@ -566,6 +707,7 @@ class LaunchPlaneWidget(QWidget):
             self.laser_combo.addItems(self._beam_stack.coherence_groups)
             if has_selection:
                 beam = self._beam_stack.beams[index]
+                self._editor_owner = beam
                 self.name_edit.setText(beam.name)
                 self.enabled_checkbox.setChecked(beam.enabled)
                 self.laser_combo.setCurrentText(beam.coherence_group)
@@ -573,8 +715,13 @@ class LaunchPlaneWidget(QWidget):
                     editor.setValue(getattr(beam, field_name))
                 for field_name, editor in self._angular_editors.items():
                     editor.setValue(math.degrees(getattr(beam, field_name)))
+                for field, text in self._editor_drafts.get(id(beam), (beam, {}))[1].items():
+                    editor = {**self._numeric_editors, **self._angular_editors}[field]
+                    editor.lineEdit().setText(text)
                 kx, ky = beam.transverse_wavevector_rad_per_um
                 self.derived_k.setText(f"{kx:.8g}, {ky:.8g} (read-only)")
+            else:
+                self._editor_owner = None
         finally:
             for editor in self._inspector_editors:
                 editor.blockSignals(False)
