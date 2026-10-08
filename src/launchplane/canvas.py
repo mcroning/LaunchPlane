@@ -32,6 +32,14 @@ from launchplane.model import (
 )
 
 
+def _label_font(point_size: int, *, bold: bool = False) -> QFont:
+    """Inherit Qt's application/platform font without requesting a family alias."""
+    font = QFont()
+    font.setPointSize(point_size)
+    font.setWeight(QFont.Bold if bold else QFont.Normal)
+    return font
+
+
 class BeamItem(QGraphicsObject):
     """Movable graphics item representing one beam."""
 
@@ -68,7 +76,7 @@ class BeamItem(QGraphicsObject):
         self.setAcceptedMouseButtons(Qt.NoButton)
         self._label = QGraphicsSimpleTextItem(self)
         self._label.setBrush(QBrush(QColor(235, 235, 235)))
-        self._label.setFont(QFont("Sans Serif", 12, QFont.Bold))
+        self._label.setFont(_label_font(12, bold=True))
         self._label.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self._label.setAcceptedMouseButtons(Qt.NoButton)
         self._label.setPos(6.0, -16.0)
@@ -412,7 +420,7 @@ class LaunchPlaneScene(QGraphicsScene):
         item = self.addSimpleText(text)
         item.setBrush(QBrush(QColor(210, 213, 218)))
         item.setFont(
-            QFont("Sans Serif", point_size, QFont.Bold if bold else QFont.Normal)
+            _label_font(point_size, bold=bold)
         )
         item.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         item.setPos(position)
