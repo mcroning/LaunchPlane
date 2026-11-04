@@ -6,7 +6,7 @@ import math
 import sys
 from dataclasses import replace
 
-from PySide6.QtCore import QEvent, QPointF, QTimer, Qt, Signal
+from PySide6.QtCore import QSize, QEvent, QPointF, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QPainterPath, QPen, QColor, QValidator
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,6 +63,49 @@ def example_beam_stack() -> BeamStackDefinition:
 
 class IntentSpinBox(QDoubleSpinBox):
     """Keep invalid pending intent visible instead of Qt's previous-value fixup."""
+
+    def _rest_text(self):
+        return self.prefix() + format(self.value(), '.6g') + self.suffix()
+
+    def textFromValue(self, value):
+        return (super().textFromValue(value) if self.hasFocus()
+                else format(value, '.6g'))
+
+    def valueFromText(self, text):
+        if not getattr(self, "_editing", False) and text == self._rest_text():
+            return self.value()
+        return super().valueFromText(text)
+
+    def validate(self, text, pos):
+        if not getattr(self, "_editing", False) and text == self._rest_text():
+            return QValidator.State.Acceptable, text, pos
+        return super().validate(text, pos)
+
+    def focusInEvent(self, event):
+        self._editing = True
+        # Never overwrite a retained pending/invalid draft when focus returns.
+        if self.lineEdit().text() == self._rest_text():
+            self.lineEdit().setText(self.prefix() +
+                QDoubleSpinBox.textFromValue(self, self.value()) + self.suffix())
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._editing = False
+        if self.hasAcceptableInput():
+            self.lineEdit().setText(self._rest_text())
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        fm = self.fontMetrics()
+        compact = max(fm.horizontalAdvance(format(v, '.6g'))
+                      for v in (self.minimum(), self.maximum()))
+        full = max(fm.horizontalAdvance(QDoubleSpinBox.textFromValue(self, v))
+                   for v in (self.minimum(), self.maximum(), self.value()))
+        return QSize(hint.width() + max(0, full - compact) + 12, hint.height())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def event(self, event) -> bool:
         # QAbstractSpinBox also fixes up text on Hide (e.g. switching to Results).
