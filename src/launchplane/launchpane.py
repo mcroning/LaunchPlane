@@ -6,8 +6,8 @@ import math
 import sys
 from dataclasses import replace
 
-from PySide6.QtCore import QSize, QEvent, QPointF, QTimer, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QPainterPath, QPen, QColor, QValidator
+from PySide6.QtCore import QLocale, QSize, QEvent, QPointF, QTimer, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QPainterPath, QPen, QColor, QDoubleValidator, QValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -64,21 +64,60 @@ def example_beam_stack() -> BeamStackDefinition:
 class IntentSpinBox(QDoubleSpinBox):
     """Keep invalid pending intent visible instead of Qt's previous-value fixup."""
 
+    def _compact_text(self, value):
+        locale = self.locale()
+        if not self.isGroupSeparatorShown():
+            locale.setNumberOptions(locale.numberOptions() | QLocale.OmitGroupSeparator)
+        return locale.toString(value, 'g', 6)
+
     def _rest_text(self):
-        return self.prefix() + format(self.value(), '.6g') + self.suffix()
+        return self.prefix() + self._compact_text(self.value()) + self.suffix()
+
+    def _exponent_input(self, text):
+        """Validate exponent input using locale syntax and fixed-point precision.
+
+        Qt's fixed-point spinbox validator rejects some locale-valid exponent
+        strings. Accept an exponent only if its numeric
+        value fits the unchanged range and decimals; never widen precision.
+        """
+        token = text
+        if self.prefix() and token.startswith(self.prefix()):
+            token = token[len(self.prefix()):]
+        if self.suffix() and token.endswith(self.suffix()):
+            token = token[:-len(self.suffix())]
+        token = token.strip()
+        if self.locale().exponential().casefold() not in token.casefold():
+            return None
+        validator = QDoubleValidator(self.minimum(), self.maximum(), -1)
+        validator.setLocale(self.locale())
+        validator.setNotation(QDoubleValidator.ScientificNotation)
+        state = validator.validate(token, len(token))[0]
+        value, ok = self.locale().toDouble(token)
+        if state == QValidator.Acceptable:
+            if (ok and math.isfinite(value) and self.minimum() <= value <= self.maximum()
+                    and round(value, self.decimals()) == value):
+                return state, value
+            return QValidator.Invalid, None
+        return state, None
 
     def textFromValue(self, value):
         return (super().textFromValue(value) if self.hasFocus()
-                else format(value, '.6g'))
+                else self._compact_text(value))
 
     def valueFromText(self, text):
         if not getattr(self, "_editing", False) and text == self._rest_text():
             return self.value()
+        exponent = self._exponent_input(text)
+        if exponent is not None:
+            return exponent[1] if exponent[0] == QValidator.Acceptable else self.value()
         return super().valueFromText(text)
 
     def validate(self, text, pos):
         if not getattr(self, "_editing", False) and text == self._rest_text():
             return QValidator.State.Acceptable, text, pos
+        exponent = self._exponent_input(text)
+        if exponent is not None:
+            return exponent[0], text, pos
         return super().validate(text, pos)
 
     def focusInEvent(self, event):
@@ -98,7 +137,7 @@ class IntentSpinBox(QDoubleSpinBox):
     def sizeHint(self):
         hint = super().sizeHint()
         fm = self.fontMetrics()
-        compact = max(fm.horizontalAdvance(format(v, '.6g'))
+        compact = max(fm.horizontalAdvance(self._compact_text(v))
                       for v in (self.minimum(), self.maximum()))
         full = max(fm.horizontalAdvance(QDoubleSpinBox.textFromValue(self, v))
                    for v in (self.minimum(), self.maximum(), self.value()))
